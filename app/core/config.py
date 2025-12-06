@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     secret_key: str = ""
     access_token_expire_minutes: int = 15  # 15 mins
     refresh_token_expire_minutes: int = 60 * 60 * 24 * 7  # 7 days
+    allowed_hosts: str = ""  # Comma-separated list of allowed origins for CORS
 
 
 settings = Settings()
