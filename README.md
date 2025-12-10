@@ -145,22 +145,22 @@ gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 
 ### Create a new migration
 ```bash
-alembic revision --autogenerate -m "Description of changes"
+uv run alembic revision --autogenerate -m "Description of changes"
 ```
 
 ### Apply migrations
 ```bash
-alembic upgrade head
+uv run alembic upgrade head
 ```
 
 ### Rollback migrations
 ```bash
-alembic downgrade -1
+uv run alembic downgrade -1
 ```
 
 ### View migration history
 ```bash
-alembic history
+uv run alembic history
 ```
 
 ## API Endpoints

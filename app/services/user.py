@@ -51,6 +51,23 @@ class UserService:
         statement = select(User).where(User.email == email)
         return self.session.exec(statement).first()
 
+    def get_active_tenant_id(self, user: User) -> uuid.UUID:
+        """
+        Helper to resolve which Tenant the user is currently acting in.
+        """
+        active_membership = next(
+            (m for m in user.memberships if m.status == MemberStatus.ACTIVE),
+            None
+        )
+
+        if not active_membership:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User does not belong to any active workspace."
+            )
+
+        return active_membership.tenant_id
+
     def create_user(self, user_in: UserCreate) -> User:
         """
         Orchestrates the Registration Flow:

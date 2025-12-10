@@ -1,5 +1,5 @@
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, date
 import uuid
 from sqlmodel import SQLModel, Field, Relationship
 from enum import Enum
@@ -53,6 +53,26 @@ class MemberStatus(str, Enum):
     """Controls access at the specific Tenant level."""
     ACTIVE = "active"
     INACTIVE = "inactive"
+
+
+class MaterialType(str, Enum):
+    NATURAL = "natural"
+    SYNTHETIC = "synthetic"
+    BLEND = "blend"
+    SEMI_SYNTHETIC = "semi_synthetic"
+
+
+class RecyclabilityClass(str, Enum):
+    CLASS_A = "class_a"  # Monomaterial, easy to recycle
+    CLASS_B = "class_b"  # Blended but separable
+    CLASS_C = "class_c"  # Difficult to recycle
+    CLASS_D = "class_d"  # Not recyclable / Energy recovery only
+
+
+class SupplierRole(str, Enum):
+    TIER_1_ASSEMBLY = "tier_1_assembly"       # Final product assembly
+    TIER_2_FABRIC = "tier_2_fabric"           # Fabric production/dyeing
+    TIER_3_FIBER = "tier_3_fiber"             # Yarn spinning/Fiber production
 
 
 class TimestampMixin(SQLModel):
@@ -282,6 +302,13 @@ class Tenant(TimestampMixin, SQLModel, table=True):
     invitations: List["TenantInvitation"] = Relationship(
         back_populates="tenant")
 
+    products: List["Product"] = Relationship(back_populates="tenant")
+    suppliers: List["Supplier"] = Relationship(back_populates="tenant")
+
+    custom_materials: List["Material"] = Relationship(back_populates="tenant")
+    custom_certifications: List["Certification"] = Relationship(
+        back_populates="tenant")
+
 
 class TenantSubscription(TimestampMixin, SQLModel, table=True):
     """
@@ -406,3 +433,218 @@ class TenantInvitation(TimestampMixin, SQLModel, table=True):
         back_populates="received_invitations",
         sa_relationship_kwargs={"foreign_keys": "TenantInvitation.invitee_id"}
     )
+
+
+class Material(TimestampMixin, SQLModel, table=True):
+    """
+    Lookup table for raw materials (Cotton, Elastane, Recycled Polyester).
+    Can be Global (System defined, tenant_id=None) or Tenant Custom.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: Optional[uuid.UUID] = Field(
+        default=None, foreign_key="tenant.id", description="Null for Global/System materials.")
+
+    code: str = Field(unique=True, index=True,
+                      description="Unique standard code (e.g. ISO code or Internal ERP code).")
+    name: str = Field(index=True)
+    material_type: MaterialType
+
+    # Backpopulates
+    product_links: List["ProductMaterialLink"] = Relationship(
+        back_populates="material")
+
+
+class Certification(TimestampMixin, SQLModel, table=True):
+    """
+    Lookup table for sustainability standards (GOTS, Oeko-Tex, Cradle2Cradle).
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: Optional[uuid.UUID] = Field(
+        default=None, foreign_key="tenant.id")
+
+    code: str = Field(unique=True, index=True,
+                      description="Unique certification identifier.")
+    name: str
+    issuer: str = Field(
+        description="Organization issuing the cert (e.g. 'Global Standard gGmbH').")
+
+    product_links: List["ProductCertificationLink"] = Relationship(
+        back_populates="certification")
+
+
+class Supplier(TimestampMixin, SQLModel, table=True):
+    """
+    A factory or vendor in the tenant's supply chain.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
+
+    name: str
+    location_country: str = Field(index=True)
+    facility_address: Optional[str] = None
+    social_audit_rating: Optional[str] = Field(
+        default=None, description="Summary of social compliance (e.g. SA8000).")
+
+    # Relationships
+    product_links: List["ProductSupplierLink"] = Relationship(
+        back_populates="supplier")
+    tenant: Tenant = Relationship(back_populates="suppliers")
+
+
+class Product(TimestampMixin, SQLModel, table=True):
+    """
+    The Core Clothing Item (SKU/Model).
+    Contains Identification and Manufacturing basics.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
+
+    # 1. Identification
+    gtin: Optional[str] = Field(
+        default=None, index=True, description="Global Trade Item Number (EAN/UPC).")
+    batch_number: Optional[str] = Field(
+        default=None, description="Specific production run for traceability.")
+    name: str = Field(description="Commercial product name.")
+    model_reference: str = Field(
+        index=True, description="Internal model number/SKU.")
+    brand_name: str = Field(description="Brand name displayed on label.")
+
+    # 2. Manufacturing
+    manufacturing_country: str = Field(
+        description="Country of final assembly.")
+    manufacture_date: Optional[date] = Field(
+        default=None, description="Month/Year of production.")
+
+    # 3. End-of-Life Instructions
+    care_instructions: Optional[str] = Field(
+        default=None, description="Washing/Drying symbols or text.")
+    disposal_instructions: Optional[str] = Field(
+        default=None, description="Recycling bin instructions.")
+
+    # Relationships
+    tenant: Tenant = Relationship(back_populates="products")
+
+    # Extensions (1-to-1)
+    durability: Optional["ProductDurability"] = Relationship(
+        sa_relationship_kwargs={"uselist": False}, back_populates="product"
+    )
+    environmental: Optional["ProductEnvironmental"] = Relationship(
+        sa_relationship_kwargs={"uselist": False}, back_populates="product"
+    )
+
+    # Associations (Many-to-Many)
+    materials: List["ProductMaterialLink"] = Relationship(
+        back_populates="product")
+    suppliers: List["ProductSupplierLink"] = Relationship(
+        back_populates="product")
+    certifications: List["ProductCertificationLink"] = Relationship(
+        back_populates="product")
+    spare_parts: List["SparePart"] = Relationship(back_populates="product")
+
+
+class ProductDurability(TimestampMixin, SQLModel, table=True):
+    """
+    ESPR Requirement: Circularity & Durability Metrics.
+    Separated to keep the main Product table clean (3NF / Domain separation).
+    """
+    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
+
+    # Physical Durability
+    pilling_resistance_grade: Optional[float] = Field(
+        default=None, description="ISO grade 1-5.")
+    color_fastness_grade: Optional[float] = None
+    dimensional_stability_percent: Optional[float] = Field(
+        default=None, description="Shrinkage rate.")
+    zipper_durability_cycles: Optional[int] = None
+
+    # Repair & Circularity
+    repairability_score: Optional[float] = Field(
+        default=None, description="Index 0-10.")
+    repair_instructions_url: Optional[str] = None
+    recyclability_class: Optional[RecyclabilityClass] = None
+
+    product: Product = Relationship(back_populates="durability")
+
+
+class ProductEnvironmental(TimestampMixin, SQLModel, table=True):
+    """
+    ESPR Requirement: Product Environmental Footprint (PEF).
+    """
+    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
+
+    # Footprint Data
+    carbon_footprint_kg_co2e: Optional[float] = None
+    water_usage_liters: Optional[float] = None
+    energy_consumption_mj: Optional[float] = None
+
+    # Chemical & Safety
+    microplastic_shedding_rate: Optional[str] = Field(
+        default=None, description="e.g. 'Low', 'Medium'.")
+    substances_of_concern_present: bool = Field(
+        default=False, description="Contains SVHCs?")
+    soc_declaration_url: Optional[str] = None
+
+    product: Product = Relationship(back_populates="environmental")
+
+
+class SparePart(TimestampMixin, SQLModel, table=True):
+    """
+    Availability of spare parts for repairability compliance.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    product_id: uuid.UUID = Field(foreign_key="product.id")
+
+    part_name: str
+    ordering_code: str
+    is_available: bool = True
+
+    product: Product = Relationship(back_populates="spare_parts")
+
+
+class ProductMaterialLink(TimestampMixin, SQLModel, table=True):
+    """
+    Links Product to Material with composition details.
+    Example: 95% Organic Cotton (Turkey).
+    """
+    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
+    material_id: uuid.UUID = Field(foreign_key="material.id", primary_key=True)
+
+    percentage: float = Field(
+        description="Composition percentage (e.g. 95.0).")
+    is_recycled: bool = Field(default=False)
+    origin_country: Optional[str] = Field(
+        default=None, description="Origin of this specific fiber batch.")
+
+    product: Product = Relationship(back_populates="materials")
+    material: Material = Relationship(back_populates="product_links")
+
+
+class ProductSupplierLink(TimestampMixin, SQLModel, table=True):
+    """
+    Supply Chain Mapping (Traceability).
+    """
+    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
+    supplier_id: uuid.UUID = Field(foreign_key="supplier.id", primary_key=True)
+
+    role: SupplierRole = Field(
+        description="Tier/Role of this supplier for this product.")
+
+    product: Product = Relationship(back_populates="suppliers")
+    supplier: Supplier = Relationship(back_populates="product_links")
+
+
+class ProductCertificationLink(TimestampMixin, SQLModel, table=True):
+    """
+    Links specific certificates to the product.
+    """
+    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
+    certification_id: uuid.UUID = Field(
+        foreign_key="certification.id", primary_key=True)
+
+    certificate_number: str = Field(
+        description="The specific license/cert number.")
+    valid_until: Optional[date] = None
+    digital_document_url: Optional[str] = None
+
+    product: Product = Relationship(back_populates="certifications")
+    certification: Certification = Relationship(back_populates="product_links")
