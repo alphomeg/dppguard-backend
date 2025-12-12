@@ -70,6 +70,6 @@ def get_current_user(
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
 
-    user.tenant_id = service.get_active_tenant_id(user)
+    user._tenant_id = service.get_active_tenant_id(user)
 
     return user

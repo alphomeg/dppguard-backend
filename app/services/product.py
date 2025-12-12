@@ -37,7 +37,7 @@ class ProductService:
         product = self.session.exec(
             select(Product).where(
                 Product.id == product_id,
-                Product.tenant_id == user.tenant_id
+                Product.tenant_id == user._tenant_id
             )
         ).first()
 
@@ -55,13 +55,13 @@ class ProductService:
         if data.gtin:
             existing = self.session.exec(
                 select(Product).where(Product.gtin == data.gtin,
-                                      Product.tenant_id == user.tenant_id)
+                                      Product.tenant_id == user._tenant_id)
             ).first()
             if existing:
                 raise HTTPException(
                     status_code=409, detail=f"Product with GTIN {data.gtin} already exists.")
 
-        product = Product(**data.model_dump(), tenant_id=user.tenant_id)
+        product = Product(**data.model_dump(), tenant_id=user._tenant_id)
         self.session.add(product)
         self.session.commit()
         self.session.refresh(product)
@@ -93,7 +93,7 @@ class ProductService:
         # Eager load all relationships
         query = (
             select(Product)
-            .where(Product.id == product_id, Product.tenant_id == user.tenant_id)
+            .where(Product.id == product_id, Product.tenant_id == user._tenant_id)
             .options(
                 selectinload(Product.durability),
                 selectinload(Product.environmental),

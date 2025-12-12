@@ -3,6 +3,7 @@ from datetime import datetime, date
 import uuid
 from sqlmodel import SQLModel, Field, Relationship
 from enum import Enum
+from pydantic import PrivateAttr
 
 
 class TenantStatus(str, Enum):
@@ -251,6 +252,9 @@ class User(TimestampMixin, SQLModel, table=True):
 
     memberships: List["TenantMember"] = Relationship(back_populates="user")
 
+    # non db field
+    _tenant_id: Optional[uuid.UUID] = PrivateAttr(None)
+
     sent_invitations: List["TenantInvitation"] = Relationship(
         back_populates="inviter",
         sa_relationship_kwargs={
@@ -452,6 +456,7 @@ class Material(TimestampMixin, SQLModel, table=True):
     # Backpopulates
     product_links: List["ProductMaterialLink"] = Relationship(
         back_populates="material")
+    tenant: Tenant = Relationship(back_populates="custom_materials")
 
 
 class Certification(TimestampMixin, SQLModel, table=True):
@@ -470,6 +475,7 @@ class Certification(TimestampMixin, SQLModel, table=True):
 
     product_links: List["ProductCertificationLink"] = Relationship(
         back_populates="certification")
+    tenant: Tenant = Relationship(back_populates="custom_certifications")
 
 
 class Supplier(TimestampMixin, SQLModel, table=True):

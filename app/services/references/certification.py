@@ -58,7 +58,7 @@ class CertificationService:
             )
 
         # 2. Create and link to tenant
-        cert = Certification(**data.model_dump(), tenant_id=user.tenant_id)
+        cert = Certification(**data.model_dump(), tenant_id=user._tenant_id)
         self.session.add(cert)
         self.session.commit()
         self.session.refresh(cert)
@@ -82,7 +82,7 @@ class CertificationService:
         query = select(Certification).where(
             or_(
                 Certification.tenant_id == None,
-                Certification.tenant_id == user.tenant_id
+                Certification.tenant_id == user._tenant_id
             )
         )
 
@@ -125,7 +125,7 @@ class CertificationService:
             )
 
         # 2. Permission Check (Ownership)
-        if cert.tenant_id != user.tenant_id:
+        if cert.tenant_id != user._tenant_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You cannot update System certifications or items from other workspaces."
@@ -185,7 +185,7 @@ class CertificationService:
             )
 
         # 2. Ownership Check
-        if cert.tenant_id != user.tenant_id:
+        if cert.tenant_id != user._tenant_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You cannot delete System certifications."

@@ -15,7 +15,7 @@ router = APIRouter()
 
 
 @router.post(
-    "/materials",
+    "/",
     response_model=MaterialRead,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new Material",
@@ -37,7 +37,7 @@ def create_material(
 
 
 @router.get(
-    "/materials",
+    "/",
     response_model=List[MaterialRead],
     summary="List all Materials",
     description="Returns both Global (System) materials and Tenant-specific materials.",
@@ -52,7 +52,7 @@ def list_materials(
 
 
 @router.patch(
-    "/materials/{material_id}",
+    "/{material_id}",
     response_model=MaterialRead,
     summary="Update a Material",
     tags=["Materials"]
@@ -74,7 +74,7 @@ def update_material(
 
 
 @router.delete(
-    "/materials/{material_id}",
+    "/{material_id}",
     status_code=status.HTTP_200_OK,
     summary="Delete a Material",
     tags=["Materials"]

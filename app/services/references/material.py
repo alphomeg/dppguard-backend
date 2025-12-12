@@ -54,7 +54,7 @@ class MaterialService:
             )
 
         # Create and link to tenant
-        material = Material(**data.model_dump(), tenant_id=user.tenant_id)
+        material = Material(**data.model_dump(), tenant_id=user._tenant_id)
         self.session.add(material)
         self.session.commit()
         self.session.refresh(material)
@@ -76,7 +76,7 @@ class MaterialService:
             List[Material]: A list of matching material records.
         """
         query = select(Material).where(
-            or_(Material.tenant_id == None, Material.tenant_id == user.tenant_id)
+            or_(Material.tenant_id == None, Material.tenant_id == user._tenant_id)
         )
 
         if search_query:
@@ -118,7 +118,7 @@ class MaterialService:
             )
 
         # 2. Permission Check (Ownership)
-        if material.tenant_id != user.tenant_id:
+        if material.tenant_id != user._tenant_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You cannot update System materials or materials from other workspaces."
@@ -175,7 +175,7 @@ class MaterialService:
             raise HTTPException(status_code=404, detail="Material not found")
 
         # 2. Ownership Check
-        if material.tenant_id != user.tenant_id:
+        if material.tenant_id != user._tenant_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You cannot delete System materials or materials from other tenants."

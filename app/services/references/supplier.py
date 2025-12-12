@@ -51,7 +51,7 @@ class SupplierService:
 
         supplier = Supplier(
             **data.model_dump(),
-            tenant_id=user.tenant_id
+            tenant_id=user._tenant_id
         )
 
         self.session.add(supplier)
@@ -72,7 +72,7 @@ class SupplierService:
             List[Supplier]: A list of matching supplier records.
         """
         # Strict isolation: Only show suppliers for this tenant
-        query = select(Supplier).where(Supplier.tenant_id == user.tenant_id)
+        query = select(Supplier).where(Supplier.tenant_id == user._tenant_id)
 
         if country_filter:
             query = query.where(Supplier.location_country == country_filter)
@@ -99,7 +99,7 @@ class SupplierService:
         supplier = self.session.exec(
             select(Supplier).where(
                 Supplier.id == supplier_id,
-                Supplier.tenant_id == user.tenant_id
+                Supplier.tenant_id == user._tenant_id
             )
         ).first()
 
@@ -130,7 +130,7 @@ class SupplierService:
         supplier = self.session.exec(
             select(Supplier).where(
                 Supplier.id == supplier_id,
-                Supplier.tenant_id == user.tenant_id
+                Supplier.tenant_id == user._tenant_id
             )
         ).first()
 
@@ -185,7 +185,7 @@ class SupplierService:
         supplier = self.session.exec(
             select(Supplier).where(
                 Supplier.id == supplier_id,
-                Supplier.tenant_id == user.tenant_id
+                Supplier.tenant_id == user._tenant_id
             )
         ).first()
 
