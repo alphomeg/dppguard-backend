@@ -76,6 +76,28 @@ class SupplierRole(str, Enum):
     TIER_3_FIBER = "tier_3_fiber"             # Yarn spinning/Fiber production
 
 
+class DPPStatus(str, Enum):
+    """
+    Lifecycle of the Digital Product Passport.
+    """
+    DRAFT = "draft"         # Internal only, data being gathered
+    PUBLISHED = "published"  # Live, QR code scans work
+    SUSPENDED = "suspended"  # Temporarily disabled (e.g. recall investigation)
+    ARCHIVED = "archived"   # Product EOL, historical record only
+
+
+class DPPEventType(str, Enum):
+    """
+    Types of events recorded in the passport's audit log.
+    """
+    CREATED = "created"
+    PUBLISHED = "published"
+    UPDATED = "updated"
+    SCANNED = "scanned"             # Public scan
+    STATUS_CHANGE = "status_change"
+    OWNERSHIP_TRANSFER = "ownership_transfer"  # For circular economy logic
+
+
 class TimestampMixin(SQLModel):
     """Standardizes audit timestamps across tables."""
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -530,22 +552,49 @@ class Product(TimestampMixin, SQLModel, table=True):
     # Relationships
     tenant: Tenant = Relationship(back_populates="products")
 
-    # Extensions (1-to-1)
     durability: Optional["ProductDurability"] = Relationship(
-        sa_relationship_kwargs={"uselist": False}, back_populates="product"
-    )
-    environmental: Optional["ProductEnvironmental"] = Relationship(
-        sa_relationship_kwargs={"uselist": False}, back_populates="product"
+        sa_relationship_kwargs={
+            "uselist": False,
+            "cascade": "all, delete-orphan"
+        },
+        back_populates="product"
     )
 
-    # Associations (Many-to-Many)
+    environmental: Optional["ProductEnvironmental"] = Relationship(
+        sa_relationship_kwargs={
+            "uselist": False,
+            "cascade": "all, delete-orphan"
+        },
+        back_populates="product"
+    )
+
     materials: List["ProductMaterialLink"] = Relationship(
-        back_populates="product")
+        back_populates="product",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+
     suppliers: List["ProductSupplierLink"] = Relationship(
-        back_populates="product")
+        back_populates="product",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+
     certifications: List["ProductCertificationLink"] = Relationship(
-        back_populates="product")
-    spare_parts: List["SparePart"] = Relationship(back_populates="product")
+        back_populates="product",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+
+    spare_parts: List["SparePart"] = Relationship(
+        back_populates="product",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+
+    passport: Optional["DigitalProductPassport"] = Relationship(
+        sa_relationship_kwargs={
+            "uselist": False,  # Enforces One-to-One on the ORM side
+            "cascade": "all, delete-orphan"
+        },
+        back_populates="product"
+    )
 
 
 class ProductDurability(TimestampMixin, SQLModel, table=True):
@@ -612,8 +661,9 @@ class ProductMaterialLink(TimestampMixin, SQLModel, table=True):
     Links Product to Material with composition details.
     Example: 95% Organic Cotton (Turkey).
     """
-    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
-    material_id: uuid.UUID = Field(foreign_key="material.id", primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    product_id: uuid.UUID = Field(foreign_key="product.id")
+    material_id: uuid.UUID = Field(foreign_key="material.id")
 
     percentage: float = Field(
         description="Composition percentage (e.g. 95.0).")
@@ -629,8 +679,9 @@ class ProductSupplierLink(TimestampMixin, SQLModel, table=True):
     """
     Supply Chain Mapping (Traceability).
     """
-    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
-    supplier_id: uuid.UUID = Field(foreign_key="supplier.id", primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    product_id: uuid.UUID = Field(foreign_key="product.id")
+    supplier_id: uuid.UUID = Field(foreign_key="supplier.id")
 
     role: SupplierRole = Field(
         description="Tier/Role of this supplier for this product.")
@@ -643,9 +694,9 @@ class ProductCertificationLink(TimestampMixin, SQLModel, table=True):
     """
     Links specific certificates to the product.
     """
-    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
-    certification_id: uuid.UUID = Field(
-        foreign_key="certification.id", primary_key=True)
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    product_id: uuid.UUID = Field(foreign_key="product.id")
+    certification_id: uuid.UUID = Field(foreign_key="certification.id")
 
     certificate_number: str = Field(
         description="The specific license/cert number.")
@@ -654,3 +705,109 @@ class ProductCertificationLink(TimestampMixin, SQLModel, table=True):
 
     product: Product = Relationship(back_populates="certifications")
     certification: Certification = Relationship(back_populates="product_links")
+
+
+class DigitalProductPassport(TimestampMixin, SQLModel, table=True):
+    """
+    The Digital Twin identity.
+
+    This model represents the public-facing interface of the Product.
+    It manages the "Key" (QR Code/URL) to access the "Value" (Product Data).
+
+    Attributes:
+        product_id: 1:1 Link to the internal product data.
+        public_uid: A unique, non-guessable ID exposed in the URL (not the DB UUID).
+                    Useful for GS1 Digital Link compliance.
+        status: Controls public visibility.
+        qr_code_url: Storage link to the generated QR image.
+        target_url: The actual destination URL the QR points to.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+
+    # Enforce 1:1 relationship with Product
+    product_id: uuid.UUID = Field(foreign_key="product.id", unique=True)
+
+    # Public Facing Identity
+    public_uid: str = Field(
+        unique=True,
+        index=True,
+        description="Public specific ID (e.g., for GS1 Digital Link path)."
+    )
+
+    status: DPPStatus = Field(default=DPPStatus.DRAFT)
+
+    # Access details
+    qr_code_url: Optional[str] = Field(
+        default=None,
+        description="URL to the stored QR code image (S3/Blob)."
+    )
+    target_url: str = Field(
+        description="The resolved web link where the DPP is hosted."
+    )
+
+    # Versioning (Important for regulatory compliance)
+    version: int = Field(
+        default=1, description="Increments on significant data updates.")
+    blockchain_hash: Optional[str] = Field(
+        default=None,
+        description="Optional hash if anchoring data to a blockchain for immutability."
+    )
+
+    # Relationships
+    product: "Product" = Relationship(back_populates="passport")
+    events: List["DPPEvent"] = Relationship(
+        back_populates="passport",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+    extra_details: List["DPPExtraDetail"] = Relationship(
+        back_populates="passport",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+
+
+class DPPEvent(SQLModel, table=True):
+    """
+    Audit Log / Journey for the Passport.
+
+    Tracks when the passport was published, updated, or scanned.
+    Essential for 'Provenance' requirements in DPP legislation.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    dpp_id: uuid.UUID = Field(
+        foreign_key="digitalproductpassport.id", index=True)
+
+    event_type: DPPEventType
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+    description: Optional[str] = Field(default=None)
+
+    # Location data (Optional, for supply chain events)
+    location: Optional[str] = Field(description="City/Country or GPS coords.")
+
+    # If the action was performed by a logged-in user
+    actor_id: Optional[uuid.UUID] = Field(default=None, foreign_key="user.id")
+
+    passport: DigitalProductPassport = Relationship(back_populates="events")
+
+
+class DPPExtraDetail(TimestampMixin, SQLModel, table=True):
+    """
+    Key-Value store for Passport-specific attributes.
+
+    Allows tenants to add custom fields to the Passport display 
+    that aren't strictly part of the physical product schema.
+    (e.g., "Marketing Story", "Video Link", "Warranty Terms").
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    dpp_id: uuid.UUID = Field(foreign_key="digitalproductpassport.id")
+
+    key: str = Field(
+        index=True, description="Display label (e.g. 'Warranty Info').")
+    value: str = Field(description="Content or Link.")
+    is_public: bool = Field(
+        default=True, description="If false, visible only to regulators/auditors.")
+
+    display_order: int = Field(default=0)
+
+    passport: DigitalProductPassport = Relationship(
+        back_populates="extra_details")

@@ -14,6 +14,8 @@ from app.services.references.certification import CertificationService
 
 from app.services.product import ProductService
 
+from app.services.dpp import DPPService
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="signin")
 
 
@@ -36,6 +38,10 @@ def get_certification_service(session: Session = Depends(get_session)) -> Certif
 
 def get_product_service(session: Session = Depends(get_session)) -> ProductService:
     return ProductService(session=session)
+
+
+def get_dpp_service(session: Session = Depends(get_session)) -> DPPService:
+    return DPPService(session)
 
 
 def get_current_user(

@@ -1,8 +1,8 @@
 from uuid import UUID
+from typing import List
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
 from sqlalchemy.orm import selectinload
-from loguru import logger
 
 from app.db.schema import (
     User, Product, ProductDurability, ProductEnvironmental, SparePart,
@@ -18,22 +18,10 @@ from app.models.product_spare_part import SparePartCreate, SparePartRead
 
 
 class ProductService:
-    """
-    Service layer for managing Clothing Products and their Digital Product Passport (DPP) data.
-
-    Handles:
-    - Core Product Lifecycle (Create, Update, List)
-    - ESPR Extensions (Durability, Environmental Footprint)
-    - Supply Chain Linking (Materials, Suppliers, Certifications)
-    """
-
     def __init__(self, session: Session):
         self.session = session
 
     def get_product_by_id(self, user: User, product_id: UUID) -> Product:
-        """
-        Internal helper to fetch a product and verify tenant ownership.
-        """
         product = self.session.exec(
             select(Product).where(
                 Product.id == product_id,
@@ -48,10 +36,15 @@ class ProductService:
             )
         return product
 
+    def list_products(self, user: User) -> List[Product]:
+        query = (
+            select(Product)
+            .where(Product.tenant_id == user._tenant_id)
+            .order_by(Product.created_at.desc())
+        )
+        return self.session.exec(query).all()
+
     def create_product(self, user: User, data: ProductCreate) -> Product:
-        """
-        Creates the basic product shell (SKU, Name, Batch).
-        """
         if data.gtin:
             existing = self.session.exec(
                 select(Product).where(Product.gtin == data.gtin,
@@ -68,9 +61,6 @@ class ProductService:
         return product
 
     def update_product(self, user: User, product_id: UUID, data: ProductUpdate) -> Product:
-        """
-        Updates basic product information.
-        """
         product = self.get_product_by_id(user, product_id)
 
         update_data = data.model_dump(exclude_unset=True)
@@ -85,12 +75,7 @@ class ProductService:
     def get_product_full(self, user: User, product_id: UUID) -> ProductFullDetailsRead:
         """
         Fetches the complete Digital Product Passport.
-
-        This method performs Eager Loading to fetch all related tables (materials, 
-        suppliers, extensions) in an optimized way to prevent N+1 query problems.
         """
-
-        # Eager load all relationships
         query = (
             select(Product)
             .where(Product.id == product_id, Product.tenant_id == user._tenant_id)
@@ -111,7 +96,7 @@ class ProductService:
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
 
-        # TRANSFORM: Map DB Models to API Read Models (Enriching IDs with Names)
+        # TRANSFORM: Map DB Models to API Read Models
 
         # 1. Materials
         material_dtos = [
@@ -140,11 +125,10 @@ class ProductService:
             ) for link in product.certifications
         ]
 
-        # Construct the Composite DTO
+        # FIX: Remove explicit 'created_at' and 'updated_at' args.
+        # **product.model_dump() already includes them.
         return ProductFullDetailsRead(
             **product.model_dump(),
-            created_at=product.created_at,
-            updated_at=product.updated_at,
             durability=product.durability,
             environmental=product.environmental,
             materials=material_dtos,
@@ -155,24 +139,16 @@ class ProductService:
         )
 
     def upsert_durability(self, user: User, product_id: UUID, data: ProductDurabilityUpdate) -> ProductDurability:
-        """
-        Creates or Updates the 1-to-1 Durability record.
-        """
-        # Ensure product exists and belongs to user
         self.get_product_by_id(user, product_id)
-
-        # Check existing extension record
         durability_record = self.session.exec(
             select(ProductDurability).where(
                 ProductDurability.product_id == product_id)
         ).first()
 
         if durability_record:
-            # Update existing
             for key, value in data.model_dump(exclude_unset=True).items():
                 setattr(durability_record, key, value)
         else:
-            # Create new
             durability_record = ProductDurability(
                 product_id=product_id,
                 **data.model_dump()
@@ -184,11 +160,7 @@ class ProductService:
         return durability_record
 
     def upsert_environmental(self, user: User, product_id: UUID, data: ProductEnvironmentalUpdate) -> ProductEnvironmental:
-        """
-        Creates or Updates the 1-to-1 PEF record.
-        """
         self.get_product_by_id(user, product_id)
-
         env_record = self.session.exec(
             select(ProductEnvironmental).where(
                 ProductEnvironmental.product_id == product_id)
@@ -210,23 +182,24 @@ class ProductService:
 
     def add_material_link(self, user: User, product_id: UUID, data: ProductMaterialLinkCreate):
         """
-        Links a material to the product. Checks total composition logic could go here.
+        Idempotent (Upsert): 
+        If material is already linked, UPDATE the percentage/origin. 
+        If not, CREATE the link.
         """
         product = self.get_product_by_id(user, product_id)
         tenant_id = product.tenant_id
 
-        # Validate Material exists and is accessible
+        # Validate Material
         material = self.session.exec(select(Material).where(
             Material.id == data.material_id)).first()
         if not material:
             raise HTTPException(status_code=404, detail="Material not found")
 
-        # Access Check: Material must be Global or belong to Tenant
         if material.tenant_id and material.tenant_id != tenant_id:
             raise HTTPException(
                 status_code=403, detail="Cannot access this material")
 
-        # Check if already linked
+        # Check existence
         existing_link = self.session.exec(
             select(ProductMaterialLink).where(
                 ProductMaterialLink.product_id == product_id,
@@ -235,24 +208,29 @@ class ProductService:
         ).first()
 
         if existing_link:
-            # Update existing percentage if trying to add again
+            # UPDATE existing link
             existing_link.percentage = data.percentage
             existing_link.is_recycled = data.is_recycled
             existing_link.origin_country = data.origin_country
             self.session.add(existing_link)
         else:
-            # Create new link
+            # CREATE new link
             new_link = ProductMaterialLink(
                 product_id=product_id, **data.model_dump())
             self.session.add(new_link)
 
         self.session.commit()
-        return {"status": "linked", "material_id": data.material_id}
+        return {"status": "synced", "material_id": data.material_id}
 
     def add_supplier_link(self, user: User, product_id: UUID, data: ProductSupplierLinkCreate):
+        """
+        Idempotent:
+        If (Product + Supplier + Role) exists -> Return Success (Do nothing).
+        If not -> Create Link.
+        """
         product = self.get_product_by_id(user, product_id)
 
-        # Verify supplier ownership
+        # 1. Verify Supplier
         supplier = self.session.exec(
             select(Supplier).where(
                 Supplier.id == data.supplier_id,
@@ -264,34 +242,64 @@ class ProductService:
             raise HTTPException(
                 status_code=404, detail="Supplier not found or access denied")
 
-        # Create Link
+        # 2. Check for EXACT duplicate
+        existing_link = self.session.exec(
+            select(ProductSupplierLink).where(
+                ProductSupplierLink.product_id == product_id,
+                ProductSupplierLink.supplier_id == data.supplier_id,
+                ProductSupplierLink.role == data.role
+            )
+        ).first()
+
+        if existing_link:
+            # Already exists, return success to frontend
+            return {
+                "status": "exists",
+                "supplier_id": data.supplier_id,
+                "role": data.role
+            }
+
+        # 3. Create Link
         link = ProductSupplierLink(product_id=product_id, **data.model_dump())
         self.session.add(link)
+        self.session.commit()
 
-        try:
-            self.session.commit()
-        except Exception:
-            # Likely duplicate PK constraint if user tries to add same supplier twice
-            self.session.rollback()
-            raise HTTPException(
-                status_code=409, detail="Supplier already linked to this product.")
-
-        return {"status": "linked", "supplier_id": data.supplier_id}
+        return {
+            "status": "created",
+            "supplier_id": data.supplier_id,
+            "role": data.role
+        }
 
     def add_certification_link(self, user: User, product_id: UUID, data: ProductCertificationLinkCreate):
+        """
+        Idempotent (Upsert):
+        If Certification is linked, UPDATE validity/url.
+        If not, CREATE link.
+        """
         self.get_product_by_id(user, product_id)
-        # Create Link
-        link = ProductCertificationLink(
-            product_id=product_id, **data.model_dump())
-        self.session.add(link)
-        try:
-            self.session.commit()
-        except Exception:
-            self.session.rollback()
-            raise HTTPException(
-                status_code=409, detail="Certification already linked to this product.")
 
-        return {"status": "linked", "certification_id": data.certification_id}
+        # Check existence
+        existing_link = self.session.exec(
+            select(ProductCertificationLink).where(
+                ProductCertificationLink.product_id == product_id,
+                ProductCertificationLink.certification_id == data.certification_id
+            )
+        ).first()
+
+        if existing_link:
+            # Update
+            existing_link.certificate_number = data.certificate_number
+            existing_link.valid_until = data.valid_until
+            existing_link.digital_document_url = data.digital_document_url
+            self.session.add(existing_link)
+        else:
+            # Create
+            link = ProductCertificationLink(
+                product_id=product_id, **data.model_dump())
+            self.session.add(link)
+
+        self.session.commit()
+        return {"status": "synced", "certification_id": data.certification_id}
 
     def add_spare_part(self, user: User, product_id: UUID, data: SparePartCreate) -> SparePart:
         self.get_product_by_id(user, product_id)
@@ -300,3 +308,96 @@ class ProductService:
         self.session.commit()
         self.session.refresh(part)
         return part
+
+    def delete_product(self, user: User, product_id: UUID):
+        """
+        Deletes a product and its related associations.
+        """
+        product = self.get_product_by_id(user, product_id)
+        # SQLAlchemy handles cascade delete based on model config
+        self.session.delete(product)
+        self.session.commit()
+
+    def remove_material_link(self, user: User, product_id: UUID, material_id: UUID):
+        """
+        Removes a specific material from the product composition.
+        """
+        # 1. Security Check: Ensure User owns the Product
+        self.get_product_by_id(user, product_id)
+
+        # 2. Find the specific link
+        link = self.session.exec(
+            select(ProductMaterialLink).where(
+                ProductMaterialLink.product_id == product_id,
+                ProductMaterialLink.material_id == material_id
+            )
+        ).first()
+
+        if link:
+            self.session.delete(link)
+            self.session.commit()
+
+        # If link doesn't exist, we consider it "already deleted" (Idempotent success)
+        return
+
+    def remove_supplier_link(self, user: User, product_id: UUID, supplier_id: UUID):
+        """
+        Removes a supplier from the product. 
+        Note: If a supplier has multiple roles (e.g., Tier 1 AND Tier 2), 
+        this will remove ALL roles for that supplier on this product.
+        """
+        self.get_product_by_id(user, product_id)
+
+        links = self.session.exec(
+            select(ProductSupplierLink).where(
+                ProductSupplierLink.product_id == product_id,
+                ProductSupplierLink.supplier_id == supplier_id
+            )
+        ).all()
+
+        if links:
+            for link in links:
+                self.session.delete(link)
+            self.session.commit()
+        return
+
+    def remove_certification_link(self, user: User, product_id: UUID, certification_id: UUID):
+        """
+        Unlinks a certification from a product.
+        """
+        self.get_product_by_id(user, product_id)
+
+        link = self.session.exec(
+            select(ProductCertificationLink).where(
+                ProductCertificationLink.product_id == product_id,
+                ProductCertificationLink.certification_id == certification_id
+            )
+        ).first()
+
+        if link:
+            self.session.delete(link)
+            self.session.commit()
+        return
+
+    def remove_spare_part(self, user: User, product_id: UUID, part_id: UUID):
+        """
+        Deletes a specific spare part entry.
+        """
+        self.get_product_by_id(user, product_id)
+
+        part = self.session.exec(
+            select(SparePart).where(
+                SparePart.id == part_id,
+                SparePart.product_id == product_id
+            )
+        ).first()
+
+        if part:
+            self.session.delete(part)
+            self.session.commit()
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Spare part not found."
+            )
+        return

@@ -16,7 +16,7 @@ router = APIRouter()
 
 
 @router.post(
-    "/suppliers",
+    "/",
     response_model=SupplierRead,
     status_code=status.HTTP_201_CREATED,
     summary="Register a new Supplier",
@@ -34,7 +34,7 @@ def create_supplier(
 
 
 @router.get(
-    "/suppliers",
+    "/",
     response_model=List[SupplierRead],
     summary="List Suppliers",
     description="Returns list of suppliers strictly belonging to the current tenant.",
@@ -54,7 +54,7 @@ def list_suppliers(
 
 
 @router.get(
-    "/suppliers/{supplier_id}",
+    "/{supplier_id}",
     response_model=SupplierRead,
     summary="Get Supplier Details",
     tags=["Suppliers"]
@@ -68,7 +68,7 @@ def get_supplier(
 
 
 @router.patch(
-    "/suppliers/{supplier_id}",
+    "/{supplier_id}",
     response_model=SupplierRead,
     summary="Update Supplier",
     tags=["Suppliers"]
@@ -86,7 +86,7 @@ def update_supplier(
 
 
 @router.delete(
-    "/suppliers/{supplier_id}",
+    "/{supplier_id}",
     status_code=status.HTTP_200_OK,
     summary="Delete Supplier",
     tags=["Suppliers"]

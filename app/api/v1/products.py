@@ -1,4 +1,5 @@
 from uuid import UUID
+from typing_extensions import List
 from fastapi import APIRouter, Depends, status
 
 from app.core.dependencies import get_current_user, get_product_service
@@ -27,8 +28,24 @@ from app.models.product_spare_part import SparePartCreate, SparePartRead
 router = APIRouter()
 
 
+@router.get(
+    "/",
+    response_model=List[ProductRead],
+    summary="List Products",
+    tags=["Products"]
+)
+def list_products(
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Retrieve a paginated list of products for the current tenant.
+    """
+    return service.list_products(user=current_user)
+
+
 @router.post(
-    "/products",
+    "/",
     response_model=ProductRead,
     status_code=status.HTTP_201_CREATED,
     summary="Create Product Shell",
@@ -47,7 +64,7 @@ def create_product(
 
 
 @router.get(
-    "/products/{product_id}",
+    "/{product_id}",
     response_model=ProductFullDetailsRead,
     summary="Get Digital Product Passport (DPP)",
     description="Returns the full aggregated view: Details + Materials + Suppliers + Certs + Footprint.",
@@ -65,7 +82,7 @@ def get_product_dpp(
 
 
 @router.patch(
-    "/products/{product_id}",
+    "/{product_id}",
     response_model=ProductRead,
     summary="Update Basic Info",
     tags=["Products"]
@@ -83,7 +100,7 @@ def update_product(
 
 
 @router.put(
-    "/products/{product_id}/durability",
+    "/{product_id}/durability",
     response_model=ProductDurabilityRead,
     summary="Upsert Durability Data",
     tags=["Products - ESPR"]
@@ -102,7 +119,7 @@ def upsert_durability(
 
 
 @router.put(
-    "/products/{product_id}/environmental",
+    "/{product_id}/environmental",
     response_model=ProductEnvironmentalRead,
     summary="Upsert Environmental Data",
     tags=["Products - ESPR"]
@@ -121,7 +138,7 @@ def upsert_environmental(
 
 
 @router.post(
-    "/products/{product_id}/materials",
+    "/{product_id}/materials",
     status_code=status.HTTP_201_CREATED,
     summary="Add Material Composition",
     tags=["Products - Composition"]
@@ -140,7 +157,7 @@ def add_product_material(
 
 
 @router.post(
-    "/products/{product_id}/suppliers",
+    "/{product_id}/suppliers",
     status_code=status.HTTP_201_CREATED,
     summary="Add Supplier",
     tags=["Products - Supply Chain"]
@@ -158,7 +175,7 @@ def add_product_supplier(
 
 
 @router.post(
-    "/products/{product_id}/certifications",
+    "/{product_id}/certifications",
     status_code=status.HTTP_201_CREATED,
     summary="Add Certification",
     tags=["Products - Compliance"]
@@ -176,7 +193,7 @@ def add_product_certification(
 
 
 @router.post(
-    "/products/{product_id}/parts",
+    "/{product_id}/parts",
     response_model=SparePartRead,
     status_code=status.HTTP_201_CREATED,
     summary="Register Spare Part",
@@ -192,3 +209,103 @@ def create_spare_part(
     Registers a spare part available for this product model.
     """
     return service.add_spare_part(user=current_user, product_id=product_id, data=payload)
+
+
+@router.delete(
+    "/{product_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete Product",
+    tags=["Products"]
+)
+def delete_product(
+    product_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Deletes a product. 
+    This will cascade delete related links (materials, suppliers) and extensions (durability, environmental)
+    depending on your database cascade settings.
+    """
+    service.delete_product(user=current_user, product_id=product_id)
+    return
+
+
+@router.delete(
+    "/{product_id}/materials/{material_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove Material",
+    tags=["Products - Composition"]
+)
+def remove_product_material(
+    product_id: UUID,
+    material_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Removes a raw material from the product's composition.
+    """
+    service.remove_material_link(
+        user=current_user, product_id=product_id, material_id=material_id)
+    return
+
+
+@router.delete(
+    "/{product_id}/suppliers/{supplier_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove Supplier",
+    tags=["Products - Supply Chain"]
+)
+def remove_product_supplier(
+    product_id: UUID,
+    supplier_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Removes a supplier (and all their roles) from this product.
+    """
+    service.remove_supplier_link(
+        user=current_user, product_id=product_id, supplier_id=supplier_id)
+    return
+
+
+@router.delete(
+    "/{product_id}/certifications/{certification_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove Certification",
+    tags=["Products - Compliance"]
+)
+def remove_product_certification(
+    product_id: UUID,
+    certification_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Unlinks a compliance certificate from the product.
+    """
+    service.remove_certification_link(
+        user=current_user, product_id=product_id, certification_id=certification_id)
+    return
+
+
+@router.delete(
+    "/{product_id}/parts/{part_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete Spare Part",
+    tags=["Products - Repairability"]
+)
+def delete_spare_part(
+    product_id: UUID,
+    part_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Permanently deletes a spare part entry for this product.
+    """
+    service.remove_spare_part(
+        user=current_user, product_id=product_id, part_id=part_id)
+    return

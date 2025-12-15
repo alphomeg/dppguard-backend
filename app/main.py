@@ -8,6 +8,7 @@ from app.api.v1.references import materials
 from app.api.v1.references import suppliers
 from app.api.v1.references import certification
 from app.api.v1 import products
+from app.api.v1 import dpp
 
 
 from app.core.config import settings
@@ -41,6 +42,9 @@ app.include_router(certification.router, prefix="/api/v1/certifications")
 
 # Product routes
 app.include_router(products.router, prefix="/api/v1/products")
+
+# DPP routes
+app.include_router(dpp.router, prefix="/api/v1/dpp")
 
 
 if __name__ == "__main__":

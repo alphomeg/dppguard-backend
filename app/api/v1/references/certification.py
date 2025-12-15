@@ -16,7 +16,7 @@ router = APIRouter()
 
 
 @router.post(
-    "/certifications",
+    "/",
     response_model=CertificationRead,
     status_code=status.HTTP_201_CREATED,
     summary="Create Certification",
@@ -34,7 +34,7 @@ def create_certification(
 
 
 @router.get(
-    "/certifications",
+    "/",
     response_model=List[CertificationRead],
     summary="List Certifications",
     description="Returns both Global (System) certifications and Tenant-specific ones.",
@@ -49,7 +49,7 @@ def list_certifications(
 
 
 @router.patch(
-    "/certifications/{certification_id}",
+    "/{certification_id}",
     response_model=CertificationRead,
     summary="Update Certification",
     tags=["Certifications"]
@@ -71,7 +71,7 @@ def update_certification(
 
 
 @router.delete(
-    "/certifications/{certification_id}",
+    "/{certification_id}",
     status_code=status.HTTP_200_OK,
     summary="Delete Certification",
     tags=["Certifications"]
