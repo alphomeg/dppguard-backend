@@ -335,6 +335,12 @@ class Tenant(TimestampMixin, SQLModel, table=True):
     custom_certifications: List["Certification"] = Relationship(
         back_populates="tenant")
 
+    passports: List["DigitalProductPassport"] = Relationship(
+        back_populates="tenant")
+    dpp_events: List["DPPEvent"] = Relationship(back_populates="tenant")
+    dpp_extra_details: List["DPPExtraDetail"] = Relationship(
+        back_populates="tenant")
+
 
 class TenantSubscription(TimestampMixin, SQLModel, table=True):
     """
@@ -710,19 +716,11 @@ class ProductCertificationLink(TimestampMixin, SQLModel, table=True):
 class DigitalProductPassport(TimestampMixin, SQLModel, table=True):
     """
     The Digital Twin identity.
-
-    This model represents the public-facing interface of the Product.
-    It manages the "Key" (QR Code/URL) to access the "Value" (Product Data).
-
-    Attributes:
-        product_id: 1:1 Link to the internal product data.
-        public_uid: A unique, non-guessable ID exposed in the URL (not the DB UUID).
-                    Useful for GS1 Digital Link compliance.
-        status: Controls public visibility.
-        qr_code_url: Storage link to the generated QR image.
-        target_url: The actual destination URL the QR points to.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+
+    # NEW: Direct Tenant Link
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
 
     # Enforce 1:1 relationship with Product
     product_id: uuid.UUID = Field(foreign_key="product.id", unique=True)
@@ -745,7 +743,7 @@ class DigitalProductPassport(TimestampMixin, SQLModel, table=True):
         description="The resolved web link where the DPP is hosted."
     )
 
-    # Versioning (Important for regulatory compliance)
+    # Versioning
     version: int = Field(
         default=1, description="Increments on significant data updates.")
     blockchain_hash: Optional[str] = Field(
@@ -754,7 +752,10 @@ class DigitalProductPassport(TimestampMixin, SQLModel, table=True):
     )
 
     # Relationships
+    # Ensure Tenant model has back_populates="passports"
+    tenant: "Tenant" = Relationship(back_populates="passports")
     product: "Product" = Relationship(back_populates="passport")
+
     events: List["DPPEvent"] = Relationship(
         back_populates="passport",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"}
@@ -768,11 +769,12 @@ class DigitalProductPassport(TimestampMixin, SQLModel, table=True):
 class DPPEvent(SQLModel, table=True):
     """
     Audit Log / Journey for the Passport.
-
-    Tracks when the passport was published, updated, or scanned.
-    Essential for 'Provenance' requirements in DPP legislation.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+
+    # NEW: Direct Tenant Link (Optional for sub-resources, but good for data partitioning)
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
+
     dpp_id: uuid.UUID = Field(
         foreign_key="digitalproductpassport.id", index=True)
 
@@ -781,24 +783,25 @@ class DPPEvent(SQLModel, table=True):
 
     description: Optional[str] = Field(default=None)
 
-    # Location data (Optional, for supply chain events)
+    # Location data
     location: Optional[str] = Field(description="City/Country or GPS coords.")
 
     # If the action was performed by a logged-in user
     actor_id: Optional[uuid.UUID] = Field(default=None, foreign_key="user.id")
 
+    tenant: "Tenant" = Relationship(back_populates="dpp_events")
     passport: DigitalProductPassport = Relationship(back_populates="events")
 
 
 class DPPExtraDetail(TimestampMixin, SQLModel, table=True):
     """
     Key-Value store for Passport-specific attributes.
-
-    Allows tenants to add custom fields to the Passport display 
-    that aren't strictly part of the physical product schema.
-    (e.g., "Marketing Story", "Video Link", "Warranty Terms").
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+
+    # NEW: Direct Tenant Link
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
+
     dpp_id: uuid.UUID = Field(foreign_key="digitalproductpassport.id")
 
     key: str = Field(
@@ -809,5 +812,6 @@ class DPPExtraDetail(TimestampMixin, SQLModel, table=True):
 
     display_order: int = Field(default=0)
 
+    tenant: "Tenant" = Relationship(back_populates="dpp_extra_details")
     passport: DigitalProductPassport = Relationship(
         back_populates="extra_details")

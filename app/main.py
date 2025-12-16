@@ -1,6 +1,7 @@
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import index
 from app.api.v1 import auth
@@ -46,6 +47,8 @@ app.include_router(products.router, prefix="/api/v1/products")
 # DPP routes
 app.include_router(dpp.router, prefix="/api/v1/dpp")
 
+# Static files serving
+app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")
 
 if __name__ == "__main__":
     uvicorn.run(

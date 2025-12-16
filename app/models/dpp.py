@@ -5,6 +5,13 @@ from sqlmodel import SQLModel
 from app.db.schema import DPPStatus, DPPEventType
 
 
+class ProductSummary(SQLModel):
+    """Minimal product details for list views"""
+    id: UUID
+    name: str
+    model_reference: str
+
+
 class DPPEventBase(SQLModel):
     event_type: DPPEventType
     description: Optional[str] = None
@@ -38,7 +45,6 @@ class DPPExtraDetailRead(DPPExtraDetailBase):
 
 class DPPBase(SQLModel):
     status: DPPStatus = DPPStatus.DRAFT
-    target_url: str
     public_uid: Optional[str] = None
 
 
@@ -48,8 +54,6 @@ class DPPCreate(DPPBase):
 
 class DPPUpdate(SQLModel):
     status: Optional[DPPStatus] = None
-    target_url: Optional[str] = None
-    qr_code_url: Optional[str] = None
     version: Optional[int] = None
 
 
@@ -58,10 +62,14 @@ class DPPRead(DPPBase):
     id: UUID
     product_id: UUID
     public_uid: str
+    target_url: str  # Include in Read
     qr_code_url: Optional[str] = None
     version: int
     created_at: datetime
     updated_at: datetime
+
+    # Added Product Details
+    product: Optional[ProductSummary] = None
 
 
 class DPPFullDetailsRead(DPPRead):

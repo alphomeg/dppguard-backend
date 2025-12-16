@@ -1,3 +1,4 @@
+from typing import List
 from uuid import UUID
 from fastapi import APIRouter, Depends, status
 
@@ -12,6 +13,21 @@ from app.models.dpp import (
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/",
+    response_model=List[DPPRead],
+    status_code=status.HTTP_200_OK,
+    summary="List Passports",
+    description="List all Digital Product Passports with associated Product details.",
+    tags=["Digital Passport"]
+)
+def list_passports(
+    current_user: User = Depends(get_current_user),
+    service: DPPService = Depends(get_dpp_service)
+):
+    return service.list_passports(user=current_user)
 
 
 @router.post(
@@ -115,4 +131,20 @@ def remove_custom_detail(
 ):
     service.delete_extra_detail(
         user=current_user, dpp_id=dpp_id, detail_id=detail_id)
+    return
+
+
+@router.delete(
+    "/{dpp_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete Passport",
+    description="Deletes the passport and its history. The associated Product entity is NOT deleted.",
+    tags=["Digital Passport"]
+)
+def delete_passport(
+    dpp_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: DPPService = Depends(get_dpp_service)
+):
+    service.delete_passport(user=current_user, dpp_id=dpp_id)
     return
