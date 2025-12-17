@@ -11,7 +11,15 @@ from app.db.schema import (
 )
 from app.models.dpp import (
     DPPCreate, DPPUpdate, DPPFullDetailsRead,
-    DPPEventCreate, DPPExtraDetailCreate
+    DPPEventCreate, DPPExtraDetailCreate, DPPPublicRead
+)
+from app.models.product import ProductFullDetailsRead
+from app.models.product_material import ProductMaterialLinkRead
+from app.models.product_supplier import ProductSupplierLinkRead
+from app.models.product_certification import ProductCertificationLinkRead
+from app.models.product_spare_part import SparePartRead
+from app.db.schema import (
+    ProductMaterialLink, ProductSupplierLink, ProductCertificationLink
 )
 
 
@@ -81,7 +89,7 @@ class DPPService:
         public_uid = data.public_uid or str(uuid.uuid4())
 
         # 4. Generate Backend Fields (Target URL & QR)
-        target_url = f"{settings.public_url}/{public_uid}"
+        target_url = f"{settings.public_landing_page_host}/{public_uid}"
         qr_code_url = generate_and_save_qr(target_url, public_uid)
 
         # 4. Create with Tenant ID
@@ -200,3 +208,78 @@ class DPPService:
 
         self.session.delete(dpp)
         self.session.commit()
+
+    def get_public_passport(self, public_uid: str) -> DPPPublicRead:
+        """
+        Public endpoint logic. 
+        1. No User/Tenant check (public data).
+        2. Must be STATUS = PUBLISHED.
+        3. Eager loads EVERYTHING (Product + deep relations).
+        """
+        query = (
+            select(DigitalProductPassport)
+            .where(
+                DigitalProductPassport.public_uid == public_uid,
+                DigitalProductPassport.status == "published"
+            )
+            .options(
+                selectinload(DigitalProductPassport.events),
+                selectinload(DigitalProductPassport.extra_details),
+                # Deep Load Product
+                selectinload(DigitalProductPassport.product).options(
+                    selectinload(Product.durability),
+                    selectinload(Product.environmental),
+                    selectinload(Product.spare_parts),
+                    selectinload(Product.materials).selectinload(
+                        ProductMaterialLink.material),
+                    selectinload(Product.suppliers).selectinload(
+                        ProductSupplierLink.supplier),
+                    selectinload(Product.certifications).selectinload(
+                        ProductCertificationLink.certification)
+                )
+            )
+        )
+
+        dpp = self.session.exec(query).first()
+
+        if not dpp:
+            raise HTTPException(
+                status_code=404,
+                detail="Passport not found or not yet published."
+            )
+
+        prod = dpp.product
+
+        material_dtos = [
+            ProductMaterialLinkRead(
+                **l.model_dump(), material_name=l.material.name, material_code=l.material.code)
+            for l in prod.materials
+        ]
+        supplier_dtos = [
+            ProductSupplierLinkRead(
+                **l.model_dump(), supplier_name=l.supplier.name, supplier_country=l.supplier.location_country)
+            for l in prod.suppliers
+        ]
+        cert_dtos = [
+            ProductCertificationLinkRead(
+                **l.model_dump(), certification_name=l.certification.name, issuer=l.certification.issuer)
+            for l in prod.certifications
+        ]
+
+        full_product = ProductFullDetailsRead(
+            **prod.model_dump(),
+            durability=prod.durability,
+            environmental=prod.environmental,
+            materials=material_dtos,
+            suppliers=supplier_dtos,
+            certifications=cert_dtos,
+            spare_parts=[SparePartRead.model_validate(
+                p) for p in prod.spare_parts]
+        )
+
+        return DPPPublicRead(
+            **dpp.model_dump(),
+            events=dpp.events,
+            extra_details=dpp.extra_details,
+            product=full_product
+        )

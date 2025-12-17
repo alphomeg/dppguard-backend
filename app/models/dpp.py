@@ -3,6 +3,7 @@ from datetime import datetime
 from uuid import UUID
 from sqlmodel import SQLModel
 from app.db.schema import DPPStatus, DPPEventType
+from app.models.product import ProductFullDetailsRead
 
 
 class ProductSummary(SQLModel):
@@ -79,3 +80,14 @@ class DPPFullDetailsRead(DPPRead):
     """
     events: List[DPPEventRead] = []
     extra_details: List[DPPExtraDetailRead] = []
+
+
+class DPPPublicRead(DPPRead):
+    """
+    The Public facing view for QR Code scans.
+    Contains Full Product Data + Passport Events + Extra Details.
+    """
+    events: List[DPPEventRead] = []
+    extra_details: List[DPPExtraDetailRead] = []
+
+    product: ProductFullDetailsRead

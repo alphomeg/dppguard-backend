@@ -9,10 +9,24 @@ from app.db.schema import User
 from app.models.dpp import (
     DPPCreate, DPPRead, DPPUpdate, DPPFullDetailsRead,
     DPPEventCreate, DPPEventRead,
-    DPPExtraDetailCreate, DPPExtraDetailRead
+    DPPExtraDetailCreate, DPPExtraDetailRead, DPPPublicRead
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/public/{public_uid}",
+    response_model=DPPPublicRead,
+    summary="Fetch Public Passport",
+    description="Public access point for QR codes. Only returns PUBLISHED passports.",
+    tags=["Public"]
+)
+def get_public_passport(
+    public_uid: str,
+    service: DPPService = Depends(get_dpp_service)
+):
+    return service.get_public_passport(public_uid)
 
 
 @router.get(
