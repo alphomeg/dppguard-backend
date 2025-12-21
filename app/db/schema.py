@@ -1,7 +1,7 @@
 from typing import Optional, List
 from datetime import datetime, date
 import uuid
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import SQLModel, Field, Relationship, Column, JSON
 from enum import Enum
 from pydantic import PrivateAttr
 
@@ -22,14 +22,22 @@ class TenantStatus(str, Enum):
 
 class TenantType(str, Enum):
     """
-    Defines the nature of the Tenant.
+    Categorizes the organization's role within the product lifecycle and platform ecosystem.
+
+    This classification determines the tenant's primary functional capabilities and 
+    permissions workflow, particularly regarding product ownership and data contribution.
 
     Attributes:
-        PERSONAL: A solo workspace automatically created for a user (1:1 with User).
-        ORGANIZATION: A collaborative workspace that can have multiple members.
+        BRAND: The entity that owns the product identity (SKU/GTIN). Brands are responsible 
+            for approving data versions and publishing the Digital Product Passport (DPP).
+        SUPPLIER: A manufacturing or material partner. Suppliers typically contribute 
+            traceability data, certifications, and material compositions to product versions.
+        HYBRID: An organization that operates as both a Brand and a Supplier (e.g., 
+            vertically integrated manufacturers who sell their own products).
     """
-    PERSONAL = "personal"
-    ORGANIZATION = "organization"
+    BRAND = "brand"
+    SUPPLIER = "supplier"
+    HYBRID = "hybrid"
 
 
 class SubscriptionStatus(str, Enum):
@@ -56,10 +64,20 @@ class MemberStatus(str, Enum):
     INACTIVE = "inactive"
 
 
+class VersionStatus(str, Enum):
+    """Lifecycle of a Product Data Version."""
+    WORKING_DRAFT = "working_draft"   # Internal to the creator
+    SUBMITTED = "submitted"           # Sent from Supplier to Brand for review
+    REJECTED = "rejected"             # Sent back by Brand for changes
+    APPROVED = "approved"             # Finalized data
+    PUBLISHED = "published"           # Currently visible on the live QR code
+
+
 class MaterialType(str, Enum):
     NATURAL = "natural"
     SYNTHETIC = "synthetic"
     BLEND = "blend"
+    RECYCLED = "recycled"
     SEMI_SYNTHETIC = "semi_synthetic"
 
 
@@ -101,8 +119,10 @@ class DPPEventType(str, Enum):
 class TimestampMixin(SQLModel):
     """Standardizes audit timestamps across tables."""
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column_kwargs={
-                                 "onupdate": datetime.utcnow})
+    updated_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        sa_column_kwargs={"onupdate": datetime.utcnow}
+    )
 
 
 class PlanFeatureLink(TimestampMixin, SQLModel, table=True):
@@ -289,6 +309,9 @@ class User(TimestampMixin, SQLModel, table=True):
             "primaryjoin": "TenantInvitation.invitee_id==User.id"}
     )
 
+    created_versions: List["ProductVersion"] = Relationship(
+        back_populates="created_by_user")
+
 
 class Tenant(TimestampMixin, SQLModel, table=True):
     """
@@ -315,7 +338,7 @@ class Tenant(TimestampMixin, SQLModel, table=True):
                       description="URL-friendly identifier.")
 
     type: TenantType = Field(
-        default=TenantType.ORGANIZATION, description="Personal or Organization.")
+        default=TenantType.BRAND, description="Nature of the company.")
     status: TenantStatus = Field(
         default=TenantStatus.ACTIVE, description="Lifecycle status.")
 
@@ -482,28 +505,7 @@ class Material(TimestampMixin, SQLModel, table=True):
     material_type: MaterialType
 
     # Backpopulates
-    product_links: List["ProductMaterialLink"] = Relationship(
-        back_populates="material")
     tenant: Tenant = Relationship(back_populates="custom_materials")
-
-
-class Certification(TimestampMixin, SQLModel, table=True):
-    """
-    Lookup table for sustainability standards (GOTS, Oeko-Tex, Cradle2Cradle).
-    """
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    tenant_id: Optional[uuid.UUID] = Field(
-        default=None, foreign_key="tenant.id")
-
-    code: str = Field(unique=True, index=True,
-                      description="Unique certification identifier.")
-    name: str
-    issuer: str = Field(
-        description="Organization issuing the cert (e.g. 'Global Standard gGmbH').")
-
-    product_links: List["ProductCertificationLink"] = Relationship(
-        back_populates="certification")
-    tenant: Tenant = Relationship(back_populates="custom_certifications")
 
 
 class Supplier(TimestampMixin, SQLModel, table=True):
@@ -520,132 +522,143 @@ class Supplier(TimestampMixin, SQLModel, table=True):
         default=None, description="Summary of social compliance (e.g. SA8000).")
 
     # Relationships
-    product_links: List["ProductSupplierLink"] = Relationship(
-        back_populates="supplier")
     tenant: Tenant = Relationship(back_populates="suppliers")
+
+
+class Certification(TimestampMixin, SQLModel, table=True):
+    """
+    Lookup table for sustainability standards (GOTS, Oeko-Tex, Cradle2Cradle).
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: Optional[uuid.UUID] = Field(
+        default=None, foreign_key="tenant.id")
+
+    code: str = Field(unique=True, index=True,
+                      description="Unique certification identifier.")
+    name: str
+    issuer: str = Field(
+        description="Organization issuing the cert (e.g. 'Global Standard gGmbH').")
+
+    tenant: Tenant = Relationship(back_populates="custom_certifications")
 
 
 class Product(TimestampMixin, SQLModel, table=True):
     """
-    The Core Clothing Item (SKU/Model).
-    Contains Identification and Manufacturing basics.
+    The permanent 'Anchor' for a garment. 
+    IDs and SKUs here should never change; all data updates happen in ProductVersion.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
+    tenant_id: uuid.UUID = Field(
+        foreign_key="tenant.id", index=True, description="The Brand that owns the product.")
 
-    # 1. Identification
+    sku: str = Field(index=True, unique=True,
+                     description="Internal model number/SKU.")
     gtin: Optional[str] = Field(
         default=None, index=True, description="Global Trade Item Number (EAN/UPC).")
-    batch_number: Optional[str] = Field(
-        default=None, description="Specific production run for traceability.")
-    name: str = Field(description="Commercial product name.")
-    model_reference: str = Field(
-        index=True, description="Internal model number/SKU.")
-    brand_name: str = Field(description="Brand name displayed on label.")
 
-    # 2. Manufacturing
+    tenant: Tenant = Relationship(back_populates="owned_products")
+    versions: List["ProductVersion"] = Relationship(back_populates="product")
+    passport: Optional["DigitalProductPassport"] = Relationship(
+        back_populates="product")
+    spare_parts: List["SparePart"] = Relationship(
+        back_populates="product", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+
+
+class ProductVersion(TimestampMixin, SQLModel, table=True):
+    """
+    Snapshot of product data at a point in time. 
+    Every significant change creates a new version for full auditability.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    product_id: uuid.UUID = Field(foreign_key="product.id", index=True)
+
+    version_number: int = Field(
+        default=1, description="Sequential version counter.")
+    status: VersionStatus = Field(default=VersionStatus.WORKING_DRAFT)
+    change_note: Optional[str] = Field(
+        default=None, description="Reason for this update or rejection.")
+
+    # Audit Trail
+    created_by_user_id: uuid.UUID = Field(
+        foreign_key="user.id", description="The individual who edited this.")
+    created_by_tenant_id: uuid.UUID = Field(
+        foreign_key="tenant.id", description="The organization responsible for this data.")
+
+    # Core Display Data (ESPR)
+    product_name_display: str = Field(
+        description="Commercial name shown to consumers.")
+    brand_name_display: str = Field(
+        description="Brand name shown on the label.")
     manufacturing_country: str = Field(
         description="Country of final assembly.")
-    manufacture_date: Optional[date] = Field(
-        default=None, description="Month/Year of production.")
 
-    # 3. End-of-Life Instructions
-    care_instructions: Optional[str] = Field(
-        default=None, description="Washing/Drying symbols or text.")
-    disposal_instructions: Optional[str] = Field(
-        default=None, description="Recycling bin instructions.")
-
-    # Relationships
-    tenant: Tenant = Relationship(back_populates="products")
-
-    durability: Optional["ProductDurability"] = Relationship(
-        sa_relationship_kwargs={
-            "uselist": False,
-            "cascade": "all, delete-orphan"
-        },
-        back_populates="product"
-    )
-
-    environmental: Optional["ProductEnvironmental"] = Relationship(
-        sa_relationship_kwargs={
-            "uselist": False,
-            "cascade": "all, delete-orphan"
-        },
-        back_populates="product"
-    )
-
-    materials: List["ProductMaterialLink"] = Relationship(
-        back_populates="product",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
-    )
-
-    suppliers: List["ProductSupplierLink"] = Relationship(
-        back_populates="product",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
-    )
-
-    certifications: List["ProductCertificationLink"] = Relationship(
-        back_populates="product",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
-    )
-
-    spare_parts: List["SparePart"] = Relationship(
-        back_populates="product",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
-    )
-
-    passport: Optional["DigitalProductPassport"] = Relationship(
-        sa_relationship_kwargs={
-            "uselist": False,  # Enforces One-to-One on the ORM side
-            "cascade": "all, delete-orphan"
-        },
-        back_populates="product"
-    )
-
-
-class ProductDurability(TimestampMixin, SQLModel, table=True):
-    """
-    ESPR Requirement: Circularity & Durability Metrics.
-    Separated to keep the main Product table clean (3NF / Domain separation).
-    """
-    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
-
-    # Physical Durability
-    pilling_resistance_grade: Optional[float] = Field(
-        default=None, description="ISO grade 1-5.")
-    color_fastness_grade: Optional[float] = None
-    dimensional_stability_percent: Optional[float] = Field(
-        default=None, description="Shrinkage rate.")
-    zipper_durability_cycles: Optional[int] = None
-
-    # Repair & Circularity
-    repairability_score: Optional[float] = Field(
-        default=None, description="Index 0-10.")
-    repair_instructions_url: Optional[str] = None
-    recyclability_class: Optional[RecyclabilityClass] = None
-
-    product: Product = Relationship(back_populates="durability")
-
-
-class ProductEnvironmental(TimestampMixin, SQLModel, table=True):
-    """
-    ESPR Requirement: Product Environmental Footprint (PEF).
-    """
-    product_id: uuid.UUID = Field(foreign_key="product.id", primary_key=True)
-
-    # Footprint Data
+    # Environmental Metrics
     carbon_footprint_kg_co2e: Optional[float] = None
     water_usage_liters: Optional[float] = None
     energy_consumption_mj: Optional[float] = None
 
-    # Chemical & Safety
-    microplastic_shedding_rate: Optional[str] = Field(
-        default=None, description="e.g. 'Low', 'Medium'.")
-    substances_of_concern_present: bool = Field(
-        default=False, description="Contains SVHCs?")
-    soc_declaration_url: Optional[str] = None
+    # Circularity & Durability
+    recyclability_class: Optional[RecyclabilityClass] = None
+    repairability_score: Optional[float] = Field(
+        default=None, description="Score 0-10.")
+    care_instructions: Optional[str] = Field(
+        default=None, description="Washing/care text or symbols.")
+    disposal_instructions: Optional[str] = Field(
+        default=None, description="End-of-life guidance.")
 
-    product: Product = Relationship(back_populates="environmental")
+    # Relationships
+    product: Product = Relationship(back_populates="versions")
+    created_by_user: User = Relationship(back_populates="created_versions")
+    created_by_tenant: Tenant = Relationship(back_populates="versions_created")
+
+    materials: List["VersionMaterial"] = Relationship(
+        back_populates="version", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    suppliers: List["VersionSupplier"] = Relationship(
+        back_populates="version", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    certifications: List["VersionCertification"] = Relationship(
+        back_populates="version", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+
+
+class VersionMaterial(TimestampMixin, SQLModel, table=True):
+    """Material composition snapshot for a specific product version."""
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    version_id: uuid.UUID = Field(foreign_key="productversion.id", index=True)
+    material_id: Optional[uuid.UUID] = Field(
+        default=None, foreign_key="material.id")
+
+    percentage: float = Field(description="Composition % (e.g. 95.0).")
+    origin_country: Optional[str] = Field(
+        default=None, description="Fiber origin.")
+    version: ProductVersion = Relationship(back_populates="materials")
+
+
+class VersionSupplier(TimestampMixin, SQLModel, table=True):
+    """The supply chain mapped for a specific product version."""
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    version_id: uuid.UUID = Field(foreign_key="productversion.id", index=True)
+    supplier_id: Optional[uuid.UUID] = Field(
+        default=None, foreign_key="supplier.id")
+
+    role: SupplierRole = Field(
+        description="Tier/Role for this specific version.")
+    location_display: str = Field(description="City/Region for display.")
+
+    version: ProductVersion = Relationship(back_populates="suppliers")
+
+
+class VersionCertification(TimestampMixin, SQLModel, table=True):
+    """Certificates valid for a specific product version."""
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    version_id: uuid.UUID = Field(foreign_key="productversion.id", index=True)
+    certification_id: Optional[uuid.UUID] = Field(
+        default=None, foreign_key="certification.id")
+
+    license_number: str = Field(description="License/Certificate ID.")
+    valid_until: Optional[date] = None
+    document_url: Optional[str] = Field(
+        default=None, description="Link to PDF proof.")
+
+    version: ProductVersion = Relationship(back_populates="certifications")
 
 
 class SparePart(TimestampMixin, SQLModel, table=True):
@@ -660,57 +673,6 @@ class SparePart(TimestampMixin, SQLModel, table=True):
     is_available: bool = True
 
     product: Product = Relationship(back_populates="spare_parts")
-
-
-class ProductMaterialLink(TimestampMixin, SQLModel, table=True):
-    """
-    Links Product to Material with composition details.
-    Example: 95% Organic Cotton (Turkey).
-    """
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    product_id: uuid.UUID = Field(foreign_key="product.id")
-    material_id: uuid.UUID = Field(foreign_key="material.id")
-
-    percentage: float = Field(
-        description="Composition percentage (e.g. 95.0).")
-    is_recycled: bool = Field(default=False)
-    origin_country: Optional[str] = Field(
-        default=None, description="Origin of this specific fiber batch.")
-
-    product: Product = Relationship(back_populates="materials")
-    material: Material = Relationship(back_populates="product_links")
-
-
-class ProductSupplierLink(TimestampMixin, SQLModel, table=True):
-    """
-    Supply Chain Mapping (Traceability).
-    """
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    product_id: uuid.UUID = Field(foreign_key="product.id")
-    supplier_id: uuid.UUID = Field(foreign_key="supplier.id")
-
-    role: SupplierRole = Field(
-        description="Tier/Role of this supplier for this product.")
-
-    product: Product = Relationship(back_populates="suppliers")
-    supplier: Supplier = Relationship(back_populates="product_links")
-
-
-class ProductCertificationLink(TimestampMixin, SQLModel, table=True):
-    """
-    Links specific certificates to the product.
-    """
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    product_id: uuid.UUID = Field(foreign_key="product.id")
-    certification_id: uuid.UUID = Field(foreign_key="certification.id")
-
-    certificate_number: str = Field(
-        description="The specific license/cert number.")
-    valid_until: Optional[date] = None
-    digital_document_url: Optional[str] = None
-
-    product: Product = Relationship(back_populates="certifications")
-    certification: Certification = Relationship(back_populates="product_links")
 
 
 class DigitalProductPassport(TimestampMixin, SQLModel, table=True):
