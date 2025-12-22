@@ -1,61 +1,71 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 import uuid
-from sqlmodel import SQLModel, Field, Relationship, Column, JSON
+from sqlmodel import SQLModel, Field, Relationship, JSON
 from enum import Enum
-from pydantic import PrivateAttr
+
+# ==========================================
+# 1. ENUMS & CONSTANTS
+# ==========================================
+
+
+class TenantType(str, Enum):
+    BRAND = "brand"        # e.g., UK Brand
+    SUPPLIER = "supplier"  # e.g., PK Manufacturer
+    HYBRID = "hybrid"
 
 
 class TenantStatus(str, Enum):
-    """
-    Defines the lifecycle state of a Tenant.
-
-    Attributes:
-        ACTIVE: The tenant is fully operational.
-        SUSPENDED: Access is blocked (e.g., non-payment, TOS violation).
-        ARCHIVED: Soft-deleted state, data preserved but not accessible.
-    """
     ACTIVE = "active"
     SUSPENDED = "suspended"
     ARCHIVED = "archived"
 
 
-class TenantType(str, Enum):
-    """
-    Categorizes the organization's role within the product lifecycle and platform ecosystem.
-
-    This classification determines the tenant's primary functional capabilities and 
-    permissions workflow, particularly regarding product ownership and data contribution.
-
-    Attributes:
-        BRAND: The entity that owns the product identity (SKU/GTIN). Brands are responsible 
-            for approving data versions and publishing the Digital Product Passport (DPP).
-        SUPPLIER: A manufacturing or material partner. Suppliers typically contribute 
-            traceability data, certifications, and material compositions to product versions.
-        HYBRID: An organization that operates as both a Brand and a Supplier (e.g., 
-            vertically integrated manufacturers who sell their own products).
-    """
-    BRAND = "brand"
-    SUPPLIER = "supplier"
-    HYBRID = "hybrid"
+class VersionStatus(str, Enum):
+    WORKING_DRAFT = "working_draft"   # Editable by Supplier
+    SUBMITTED = "submitted"           # Locked, waiting for Brand
+    REVISION_REQUIRED = "revision_req"  # Brand rejected, Supplier must fix
+    APPROVED = "approved"             # Locked, ready for Passport
+    PUBLISHED = "published"           # Live
+    ARCHIVED = "archived"
 
 
-class SubscriptionStatus(str, Enum):
-    ACTIVE = "active"
-    CANCELED = "canceled"
-    PAST_DUE = "past_due"
-    TRIALING = "trialing"
+class RequestStatus(str, Enum):
+    SENT = "sent"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    IN_PROGRESS = "in_progress"
+    SUBMITTED = "submitted"
+    CHANGES_REQUESTED = "changes_req"
+    COMPLETED = "completed"
+
+
+class MaterialType(str, Enum):
+    COTTON = "cotton"
+    POLYESTER = "polyester"
+    NYLON = "nylon"
+    WOOL = "wool"
+    VISCOSE = "viscose"
+    BLEND = "blend"
+    OTHER = "other"
+
+
+class SupplierRole(str, Enum):
+    TIER_1_ASSEMBLY = "tier_1_assembly"  # Final Cut & Sew
+    TIER_2_FABRIC = "tier_2_fabric"     # Fabric Mill
+    TIER_3_FIBER = "tier_3_fiber"       # Raw Fiber
+
+
+class DPPStatus(str, Enum):
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    SUSPENDED = "suspended"
 
 
 class InvitationStatus(str, Enum):
-    """
-    Tracks the lifecycle of an invitation link.
-    """
-    PENDING = "pending"   # Email sent, waiting for action.
-    ACCEPTED = "accepted"  # User clicked link and joined.
-    EXPIRED = "expired"   # Time limit passed (security).
-    DECLINED = "declined"  # User explicitly rejected the invite.
-    REVOKED = "revoked"   # Admin cancelled the invite before it was used.
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    EXPIRED = "expired"
 
 
 class MemberStatus(str, Enum):
@@ -64,172 +74,49 @@ class MemberStatus(str, Enum):
     INACTIVE = "inactive"
 
 
-class VersionStatus(str, Enum):
-    """Lifecycle of a Product Data Version."""
-    WORKING_DRAFT = "working_draft"   # Internal to the creator
-    SUBMITTED = "submitted"           # Sent from Supplier to Brand for review
-    REJECTED = "rejected"             # Sent back by Brand for changes
-    APPROVED = "approved"             # Finalized data
-    PUBLISHED = "published"           # Currently visible on the live QR code
+class ConnectionStatus(str, Enum):
+    PENDING = "pending"           # Invite sent, waiting for Supplier to accept
+    CONNECTED = "connected"       # Handshake complete, can assign Requests
+    DECLINED = "declined"         # Supplier rejected the connection
+    DISCONNECTED = "disconnected"  # Relationship ended by either party
 
 
-class MaterialType(str, Enum):
-    NATURAL = "natural"
-    SYNTHETIC = "synthetic"
-    BLEND = "blend"
-    RECYCLED = "recycled"
-    SEMI_SYNTHETIC = "semi_synthetic"
-
-
-class RecyclabilityClass(str, Enum):
-    CLASS_A = "class_a"  # Monomaterial, easy to recycle
-    CLASS_B = "class_b"  # Blended but separable
-    CLASS_C = "class_c"  # Difficult to recycle
-    CLASS_D = "class_d"  # Not recyclable / Energy recovery only
-
-
-class SupplierRole(str, Enum):
-    TIER_1_ASSEMBLY = "tier_1_assembly"       # Final product assembly
-    TIER_2_FABRIC = "tier_2_fabric"           # Fabric production/dyeing
-    TIER_3_FIBER = "tier_3_fiber"             # Yarn spinning/Fiber production
-
-
-class DPPStatus(str, Enum):
-    """
-    Lifecycle of the Digital Product Passport.
-    """
-    DRAFT = "draft"         # Internal only, data being gathered
-    PUBLISHED = "published"  # Live, QR code scans work
-    SUSPENDED = "suspended"  # Temporarily disabled (e.g. recall investigation)
-    ARCHIVED = "archived"   # Product EOL, historical record only
-
-
-class DPPEventType(str, Enum):
-    """
-    Types of events recorded in the passport's audit log.
-    """
-    CREATED = "created"
-    PUBLISHED = "published"
-    UPDATED = "updated"
-    SCANNED = "scanned"             # Public scan
-    STATUS_CHANGE = "status_change"
-    OWNERSHIP_TRANSFER = "ownership_transfer"  # For circular economy logic
+# ==========================================
+# 2. BASE MIXIN
+# ==========================================
 
 
 class TimestampMixin(SQLModel):
-    """Standardizes audit timestamps across tables."""
+    """
+    Standard audit timestamps for every table.
+    """
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(
         default_factory=datetime.utcnow,
         sa_column_kwargs={"onupdate": datetime.utcnow}
     )
 
-
-class PlanFeatureLink(TimestampMixin, SQLModel, table=True):
-    """
-    Association model linking Subscription Plans to Features with a specific value.
-
-    This acts as a pivot table that not only connects a plan to a feature
-    but also defines *how much* of that feature the plan gets.
-
-    Attributes:
-        plan_id (UUID): Foreign key to the SubscriptionPlan.
-        feature_id (UUID): Foreign key to the Feature.
-        value (str): The logical value of the feature for this plan.
-                     - For quotas: "5", "100", "unlimited"
-                     - For booleans: "true", "false"
-                     - For specific tiers: "gold_support"
-    """
-    plan_id: uuid.UUID = Field(
-        foreign_key="subscriptionplan.id", primary_key=True)
-    feature_id: uuid.UUID = Field(foreign_key="feature.id", primary_key=True)
-    value: str = Field(
-        default="true", description="The limit or state of the feature (e.g., '10', 'true').")
+# ==========================================
+# 3. RBAC (ROLES & PERMISSIONS)
+# ==========================================
 
 
 class RolePermissionLink(TimestampMixin, SQLModel, table=True):
     """
-    Association model linking Roles to Permissions.
-
-    This is a standard many-to-many pivot table used to construct
-    Access Control Lists (ACLs).
-
-    Attributes:
-        role_id (UUID): Foreign key to the Role.
-        permission_id (UUID): Foreign key to the Permission.
+    Pivot table: Roles <-> Permissions.
     """
     role_id: uuid.UUID = Field(foreign_key="role.id", primary_key=True)
     permission_id: uuid.UUID = Field(
         foreign_key="permission.id", primary_key=True)
 
 
-class Feature(TimestampMixin, SQLModel, table=True):
-    """
-    Represents a specific system capability or gate.
-
-    Features are the building blocks of subscription plans. They are not
-    code permissions (RBAC), but rather business logic gates (e.g., "Can this
-    tenant upload custom branding?", "How many projects can they create?").
-
-    Attributes:
-        id (UUID): Unique identifier.
-        key (str): A unique slug used in code to check access (e.g., 'max_projects', 'sso_enabled').
-        description (str): Human-readable explanation of what this feature controls.
-        plans (List[SubscriptionPlan]): List of plans that include this feature.
-    """
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    key: str = Field(index=True, unique=True,
-                     description="The code reference key (e.g., 'audit_logs').")
-    description: Optional[str] = Field(
-        default=None, description="Internal description of the feature.")
-
-    plans: List["SubscriptionPlan"] = Relationship(
-        back_populates="features", link_model=PlanFeatureLink)
-
-
-class SubscriptionPlan(TimestampMixin, SQLModel, table=True):
-    """
-    Represents a billing tier (SaaS Plan).
-
-    Tenants subscribe to a plan, which dictates which Features are active
-    and what limits are enforced via the PlanFeatureLink.
-
-    Attributes:
-        id (UUID): Unique identifier.
-        name (str): Display name (e.g., "Free Tier", "Enterprise").
-        price (float): Monthly cost in base currency.
-        is_personal_only (bool): If True, this plan is hidden for Organization tenants
-                                 and only available for Personal tenants.
-        tenants (List[Tenant]): List of tenants currently on this plan.
-        features (List[Feature]): List of features enabled for this plan.
-    """
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    name: str = Field(unique=True, description="Marketing name of the plan.")
-    price: float = Field(default=0.0, description="Monthly price.")
-    is_personal_only: bool = Field(
-        default=False, description="Restricts plan to Personal workspaces only.")
-
-    features: List["Feature"] = Relationship(
-        back_populates="plans", link_model=PlanFeatureLink)
-    subscriptions: List["TenantSubscription"] = Relationship(
-        back_populates="plan")
-
-
 class Permission(TimestampMixin, SQLModel, table=True):
     """
-    Represents an atomic authorization rule.
-
-    These are high-granularity keys used by the backend to verify if a user
-    can perform a specific API action.
-
-    Attributes:
-        id (UUID): Unique identifier.
-        key (str): The unique action string (e.g., 'user:create', 'billing:read').
-        roles (List[Role]): The roles that possess this permission.
+    Atomic actions (e.g., 'product:create', 'request:approve').
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    key: str = Field(unique=True, index=True,
-                     description="The permission slug (e.g., 'project:delete').")
+    key: str = Field(unique=True, index=True)
+    description: Optional[str] = None
 
     roles: List["Role"] = Relationship(
         back_populates="permissions", link_model=RolePermissionLink)
@@ -237,234 +124,95 @@ class Permission(TimestampMixin, SQLModel, table=True):
 
 class Role(TimestampMixin, SQLModel, table=True):
     """
-    Represents a collection of permissions (A Job Function).
-
-    Roles can be Global (System Defined) or Custom (Tenant Defined).
-
-    *   **Global Role**: `tenant_id` is NULL. Available to be assigned in ANY tenant.
-        (e.g., 'Owner', 'Admin', 'Viewer').
-    *   **Custom Role**: `tenant_id` is set. Only available within that specific tenant.
-        (e.g., 'Junior Editor' defined by Acme Corp).
-
-    Attributes:
-        id (UUID): Unique identifier.
-        name (str): Display name of the role.
-        tenant_id (UUID, Optional): Scope of the role. None = Global, UUID = Private to Tenant.
-        permissions (List[Permission]): The list of allowed actions.
-        memberships (List[TenantMember]): Users who hold this role in specific tenants.
+    Can be System Global (tenant_id=None) or Custom Tenant Role.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    name: str = Field(description="Display name (e.g., 'Admin').")
     tenant_id: Optional[uuid.UUID] = Field(
-        default=None, foreign_key="tenant.id", description="NULL for Global roles, Set for Custom roles.")
+        default=None, foreign_key="tenant.id")
+
+    name: str = Field(index=True)
+    description: Optional[str] = None
 
     permissions: List["Permission"] = Relationship(
         back_populates="roles", link_model=RolePermissionLink)
     memberships: List["TenantMember"] = Relationship(back_populates="role")
     tenant: Optional["Tenant"] = Relationship(back_populates="custom_roles")
 
-
-class User(TimestampMixin, SQLModel, table=True):
-    """
-    Represents a Global User Identity.
-
-    The User model holds authentication data and profile information. 
-    It is agnostic of Tenants. A user has no permissions until they are 
-    linked to a Tenant via TenantMember.
-
-    Attributes:
-        id (UUID): Unique identifier.
-        email (str): Unique signin email.
-        hashed_password (str): Securely stored password hash.
-        first_name (str): User's given name.
-        last_name (str): User's family name.
-        is_active (bool): Global kill-switch for the user account.
-        memberships (List[TenantMember]): List of tenants this user belongs to.
-    """
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    email: str = Field(unique=True, index=True,
-                       description="User's signin email.")
-    hashed_password: str = Field(description="Bcrypt/Argon2 password hash.")
-
-    first_name: Optional[str] = Field(default=None, description="First name.")
-    last_name: Optional[str] = Field(default=None, description="Last name.")
-
-    is_active: bool = Field(
-        default=True, description="If false, user cannot log in anywhere.")
-
-    memberships: List["TenantMember"] = Relationship(back_populates="user")
-
-    # non db field
-    _tenant_id: Optional[uuid.UUID] = PrivateAttr(None)
-
-    sent_invitations: List["TenantInvitation"] = Relationship(
-        back_populates="inviter",
-        sa_relationship_kwargs={
-            "primaryjoin": "TenantInvitation.inviter_id==User.id"}
-    )
-
-    received_invitations: List["TenantInvitation"] = Relationship(
-        back_populates="invitee",
-        sa_relationship_kwargs={
-            "primaryjoin": "TenantInvitation.invitee_id==User.id"}
-    )
-
-    created_versions: List["ProductVersion"] = Relationship(
-        back_populates="created_by_user")
+# ==========================================
+# 4. IDENTITY & TENANCY
+# ==========================================
 
 
 class Tenant(TimestampMixin, SQLModel, table=True):
     """
-    Represents an isolated environment (Company or Personal Workspace).
-
-    This is the core of the multi-tenancy. All business data (projects, tasks, etc.)
-    should have a foreign key to this table.
-
-    Note on Personal Accounts:
-    If `type` is PERSONAL, this represents a single user's private workspace. 
-    Logic should enforce that Personal tenants cannot have >1 member.
-
-    Attributes:
-        id (UUID): Unique identifier.
-        name (str): Display name (e.g., "Acme Inc" or "John's Workspace").
-        slug (str): Unique URL-safe identifier (e.g., "acme-inc").
-        type (TenantType): Distinguishes between Personal and Organization workspaces.
-        status (TenantStatus): Billing/Ban status.
-        plan_id (UUID): Foreign key to the current Subscription Plan.
+    The Organization (Brand X or Manufacturer Y).
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    name: str = Field(description="Organization name or Workspace name.")
-    slug: str = Field(unique=True, index=True,
-                      description="URL-friendly identifier.")
+    name: str = Field(index=True)
+    slug: str = Field(unique=True, index=True)
+    type: TenantType = Field(default=TenantType.BRAND)
+    status: TenantStatus = Field(default=TenantStatus.ACTIVE)
 
-    type: TenantType = Field(
-        default=TenantType.BRAND, description="Nature of the company.")
-    status: TenantStatus = Field(
-        default=TenantStatus.ACTIVE, description="Lifecycle status.")
-
-    subscription: Optional["TenantSubscription"] = Relationship(
-        sa_relationship_kwargs={"uselist": False}, back_populates="tenant"
-    )
-
+    # Relationships
     members: List["TenantMember"] = Relationship(back_populates="tenant")
     custom_roles: List["Role"] = Relationship(back_populates="tenant")
     invitations: List["TenantInvitation"] = Relationship(
         back_populates="tenant")
 
+    # Ownership
     products: List["Product"] = Relationship(back_populates="tenant")
-    suppliers: List["Supplier"] = Relationship(back_populates="tenant")
-
+    suppliers: List["Supplier"] = Relationship(
+        back_populates="tenant")  # Address Book
     custom_materials: List["Material"] = Relationship(back_populates="tenant")
-    custom_certifications: List["Certification"] = Relationship(
-        back_populates="tenant")
 
-    passports: List["DigitalProductPassport"] = Relationship(
-        back_populates="tenant")
-    dpp_events: List["DPPEvent"] = Relationship(back_populates="tenant")
+    # Passport Extras
     dpp_extra_details: List["DPPExtraDetail"] = Relationship(
         back_populates="tenant")
 
 
-class TenantSubscription(TimestampMixin, SQLModel, table=True):
+class User(TimestampMixin, SQLModel, table=True):
     """
-    Separates the Billing lifecycle from the Tenant identity.
-    Allows for tracking trial ends, cancellations, and external payment IDs.
+    Global User.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    # One active sub per tenant
-    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", unique=True)
-    plan_id: uuid.UUID = Field(foreign_key="subscriptionplan.id")
+    email: str = Field(unique=True, index=True)
+    hashed_password: str
+    first_name: str
+    last_name: str
+    is_active: bool = Field(default=True)
 
-    status: SubscriptionStatus = Field(default=SubscriptionStatus.ACTIVE)
-    current_period_end: datetime = Field(
-        description="When the current billing cycle ends.")
-    stripe_subscription_id: Optional[str] = Field(default=None, index=True)
-
-    tenant: Tenant = Relationship(back_populates="subscription")
-    plan: SubscriptionPlan = Relationship(back_populates="subscriptions")
+    memberships: List["TenantMember"] = Relationship(back_populates="user")
 
 
 class TenantMember(TimestampMixin, SQLModel, table=True):
     """
-    Represents the Membership (Pivot) between a User and a Tenant.
-
-    This is the authorization context. It defines:
-    1. Authorization: Is the user inside this tenant? (Existence of record)
-    2. Access Control: What can they do? (Linked Role)
-
-    Attributes:
-        id (UUID): Unique identifier.
-        user_id (UUID): Foreign key to the User.
-        tenant_id (UUID): Foreign key to the Tenant.
-        role_id (UUID): Foreign key to the Role assigned to this user in this tenant.
-        joined_at (datetime): Timestamp when user was added to the tenant.
+    User <-> Tenant Link.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    user_id: uuid.UUID = Field(
-        foreign_key="user.id", description="The member.")
-    tenant_id: uuid.UUID = Field(
-        foreign_key="tenant.id", description="The organization.")
-    role_id: uuid.UUID = Field(
-        foreign_key="role.id", description="The assigned permissions.")
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
+    user_id: uuid.UUID = Field(foreign_key="user.id", index=True)
 
-    joined_at: datetime = Field(default_factory=datetime.utcnow)
+    role_id: uuid.UUID = Field(foreign_key="role.id")
+
+    tenant: Tenant = Relationship(back_populates="members")
 
     status: MemberStatus = Field(default=MemberStatus.ACTIVE)
 
     user: User = Relationship(back_populates="memberships")
-    tenant: Tenant = Relationship(back_populates="members")
     role: Role = Relationship(back_populates="memberships")
 
 
 class TenantInvitation(TimestampMixin, SQLModel, table=True):
     """
-    Represents a secure, time-bound request for a user to join a Tenant.
-
-    This model bridges the gap between an "outsider" (someone with just an email)
-    and an "insider" (a TenantMember).
-
-    ## The Invitation Flow:
-    1. **Creation**: An existing member (`inviter_id`) triggers an invite for an `email`.
-    2. **Resolution**: 
-       - If a `User` already exists with that email, `invitee_id` can be pre-filled 
-         or resolved upon lookup.
-       - If no `User` exists, `invitee_id` remains NULL until they register.
-    3. **Consumption**: When the link is clicked (validating `token`), a new 
-       `TenantMember` record is created, and this invitation status becomes 'ACCEPTED'.
-
-    Attributes:
-        id (UUID): Unique system identifier for this record.
-        email (str): The specific email address authorized to join.
-                     (Security Note: The token should only work for this specific email).
-        token (str): A high-entropy, URL-safe string sent to the user. 
-                     Do not use the UUID `id` for public links.
-        status (InvitationStatus): Current state of the invite.
-        expires_at (datetime): Absolute timestamp when this link becomes invalid.
-
-        tenant_id (UUID): The Workspace/Organization the user is being invited to.
-        role_id (UUID): The permission set pre-selected for this user upon joining.
-
-        inviter_id (UUID): The ID of the existing user who sent the invitation 
-                           (useful for audit logs: "Who let this person in?").
-        invitee_id (UUID, Optional): The ID of the target user, if they already have 
-                                     an account. If NULL, they must sign up first.
+    Invite flow.
     """
-
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id")
+    email: str = Field(index=True)
+    token: str = Field(unique=True)
+    status: InvitationStatus = Field(default=InvitationStatus.PENDING)
+    expires_at: datetime
 
-    # Target Information
-    email: str = Field(
-        index=True, description="The email address of the person being invited.")
-
-    # Security & Lifecycle
-    token: str = Field(unique=True, index=True,
-                       description="Cryptographic token for the invitation URL.")
-    status: InvitationStatus = Field(
-        default=InvitationStatus.PENDING, description="State of the invitation.")
-    expires_at: datetime = Field(
-        description="Date when the invitation token becomes invalid.")
-
-    # Context
     tenant_id: uuid.UUID = Field(
         foreign_key="tenant.id", description="The target workspace.")
     role_id: uuid.UUID = Field(
@@ -476,8 +224,7 @@ class TenantInvitation(TimestampMixin, SQLModel, table=True):
     invitee_id: Optional[uuid.UUID] = Field(
         default=None, foreign_key="user.id", description="The receiver, if they already exist in the system.")
 
-    # Relationships
-    tenant: "Tenant" = Relationship(back_populates="invitations")
+    tenant: Tenant = Relationship(back_populates="invitations")
 
     inviter: "User" = Relationship(
         back_populates="sent_invitations",
@@ -490,127 +237,138 @@ class TenantInvitation(TimestampMixin, SQLModel, table=True):
     )
 
 
+class TenantConnection(TimestampMixin, SQLModel, table=True):
+    """
+    The B2B Connection (Brand <-> Supplier).
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    brand_tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
+    supplier_tenant_id: Optional[uuid.UUID] = Field(
+        foreign_key="tenant.id", default=None)
+    supplier_email_invite: str
+    status: ConnectionStatus = Field(default=ConnectionStatus.PENDING)
+
+# ==========================================
+# 5. SHARED LIBRARIES & RESOURCES
+# ==========================================
+
+
 class Material(TimestampMixin, SQLModel, table=True):
     """
-    Lookup table for raw materials (Cotton, Elastane, Recycled Polyester).
-    Can be Global (System defined, tenant_id=None) or Tenant Custom.
+    Reusable Material Definitions.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     tenant_id: Optional[uuid.UUID] = Field(
         default=None, foreign_key="tenant.id", description="Null for Global/System materials.")
-
+    name: str = Field(index=True)
     code: str = Field(unique=True, index=True,
                       description="Unique standard code (e.g. ISO code or Internal ERP code).")
-    name: str = Field(index=True)
     material_type: MaterialType
 
-    # Backpopulates
-    tenant: Tenant = Relationship(back_populates="custom_materials")
-
-
-class Supplier(TimestampMixin, SQLModel, table=True):
-    """
-    A factory or vendor in the tenant's supply chain.
-    """
-    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
-
-    name: str
-    location_country: str = Field(index=True)
-    facility_address: Optional[str] = None
-    social_audit_rating: Optional[str] = Field(
-        default=None, description="Summary of social compliance (e.g. SA8000).")
-
-    # Relationships
-    tenant: Tenant = Relationship(back_populates="suppliers")
+    tenant: Optional[Tenant] = Relationship(back_populates="custom_materials")
 
 
 class Certification(TimestampMixin, SQLModel, table=True):
     """
-    Lookup table for sustainability standards (GOTS, Oeko-Tex, Cradle2Cradle).
+    Global Certs (GOTS, Oeko-Tex).
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    tenant_id: Optional[uuid.UUID] = Field(
-        default=None, foreign_key="tenant.id")
+    name: str = Field(unique=True)
+    issuer: str
 
-    code: str = Field(unique=True, index=True,
-                      description="Unique certification identifier.")
+
+class Supplier(TimestampMixin, SQLModel, table=True):
+    """
+    The 'Address Book' Entry.
+    Owned by Brand, linked to 'connected_tenant_id' if they exist.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id")  # The Brand
+    connected_tenant_id: Optional[uuid.UUID] = Field(
+        foreign_key="tenant.id", default=None)  # The Real Supplier
+
     name: str
-    issuer: str = Field(
-        description="Organization issuing the cert (e.g. 'Global Standard gGmbH').")
+    location_country: str
 
-    tenant: Tenant = Relationship(back_populates="custom_certifications")
+    tenant: Tenant = Relationship(back_populates="suppliers")
+    facility_certs: List["SupplierFacilityCertification"] = Relationship(
+        back_populates="supplier")
+
+
+class SupplierFacilityCertification(TimestampMixin, SQLModel, table=True):
+    """
+    Factory-level certs (e.g. SA8000).
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    supplier_id: uuid.UUID = Field(foreign_key="supplier.id")
+    name: str
+    document_url: str
+    valid_until: Optional[date] = None
+
+    supplier: Supplier = Relationship(back_populates="facility_certs")
+
+# ==========================================
+# 6. PRODUCT ENGINE (ANCHOR & VERSION)
+# ==========================================
 
 
 class Product(TimestampMixin, SQLModel, table=True):
     """
-    The permanent 'Anchor' for a garment. 
-    IDs and SKUs here should never change; all data updates happen in ProductVersion.
+    The Immutable Anchor.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    tenant_id: uuid.UUID = Field(
-        foreign_key="tenant.id", index=True, description="The Brand that owns the product.")
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
 
-    sku: str = Field(index=True, unique=True,
-                     description="Internal model number/SKU.")
-    gtin: Optional[str] = Field(
-        default=None, index=True, description="Global Trade Item Number (EAN/UPC).")
+    sku: str = Field(unique=True, index=True)
+    gtin: Optional[str] = None
 
-    tenant: Tenant = Relationship(back_populates="owned_products")
+    tenant: Tenant = Relationship(back_populates="products")
     versions: List["ProductVersion"] = Relationship(back_populates="product")
     passport: Optional["DigitalProductPassport"] = Relationship(
         back_populates="product")
-    spare_parts: List["SparePart"] = Relationship(
-        back_populates="product", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    spare_parts: List["SparePart"] = Relationship(back_populates="product")
 
 
 class ProductVersion(TimestampMixin, SQLModel, table=True):
     """
-    Snapshot of product data at a point in time. 
-    Every significant change creates a new version for full auditability.
+    The Data Snapshot.
+    Filled by PK Manufacturer, Approved by UK Brand.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     product_id: uuid.UUID = Field(foreign_key="product.id", index=True)
 
-    version_number: int = Field(
-        default=1, description="Sequential version counter.")
+    # Workflow
+    parent_version_id: Optional[uuid.UUID] = Field(
+        foreign_key="productversion.id", default=None)
+    version_number: int = Field(default=1)
     status: VersionStatus = Field(default=VersionStatus.WORKING_DRAFT)
-    change_note: Optional[str] = Field(
-        default=None, description="Reason for this update or rejection.")
-
-    # Audit Trail
-    created_by_user_id: uuid.UUID = Field(
-        foreign_key="user.id", description="The individual who edited this.")
     created_by_tenant_id: uuid.UUID = Field(
-        foreign_key="tenant.id", description="The organization responsible for this data.")
+        foreign_key="tenant.id")  # PK Manufacturer
+    change_note: Optional[str] = None
 
-    # Core Display Data (ESPR)
-    product_name_display: str = Field(
-        description="Commercial name shown to consumers.")
-    brand_name_display: str = Field(
-        description="Brand name shown on the label.")
-    manufacturing_country: str = Field(
-        description="Country of final assembly.")
+    # --- ENVIRONMENT DATA (Per Single Piece) ---
+    manufacturing_country: str = Field(default="PK")
 
-    # Environmental Metrics
-    carbon_footprint_kg_co2e: Optional[float] = None
-    water_usage_liters: Optional[float] = None
-    energy_consumption_mj: Optional[float] = None
+    total_carbon_footprint_kg: Optional[float] = Field(
+        description="CO2e for 1 unit")
+    total_water_usage_liters: Optional[float] = Field(
+        description="Water for 1 unit")
+    total_energy_mj: Optional[float] = Field(description="Energy for 1 unit")
 
-    # Circularity & Durability
-    recyclability_class: Optional[RecyclabilityClass] = None
-    repairability_score: Optional[float] = Field(
-        default=None, description="Score 0-10.")
-    care_instructions: Optional[str] = Field(
-        default=None, description="Washing/care text or symbols.")
-    disposal_instructions: Optional[str] = Field(
-        default=None, description="End-of-life guidance.")
+    # End of Life
+    recycling_instructions: Optional[str] = Field(
+        description="How to recycle.")
+    recyclability_class: Optional[str] = Field(description="Class A-D")
+
+    # Display Data
+    product_name_display: str
+
+    # Media
+    media_gallery: List[Dict[str, Any]] = Field(
+        default=[], sa_column=Field(sa_type=JSON))
 
     # Relationships
     product: Product = Relationship(back_populates="versions")
-    created_by_user: User = Relationship(back_populates="created_versions")
-    created_by_tenant: Tenant = Relationship(back_populates="versions_created")
-
     materials: List["VersionMaterial"] = Relationship(
         back_populates="version", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     suppliers: List["VersionSupplier"] = Relationship(
@@ -620,160 +378,168 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
 
 
 class VersionMaterial(TimestampMixin, SQLModel, table=True):
-    """Material composition snapshot for a specific product version."""
+    """
+    Material Breakdown & Sourcing.
+    """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     version_id: uuid.UUID = Field(foreign_key="productversion.id", index=True)
+
+    # Definition
     material_id: Optional[uuid.UUID] = Field(
         default=None, foreign_key="material.id")
+    unlisted_material_name: Optional[str] = None  # Fallback
+    is_confidential: bool = False
 
-    percentage: float = Field(description="Composition % (e.g. 95.0).")
-    origin_country: Optional[str] = Field(
-        default=None, description="Fiber origin.")
+    # Composition
+    percentage: float
+
+    # Sourcing & Impact
+    origin_country: str = Field(description="Where material is coming from")
+    material_carbon_footprint_kg: Optional[float] = Field(
+        description="CO2 emission on procuring/producing material")
+    transport_method: Optional[str] = Field(description="Sea/Air/Road")
+
     version: ProductVersion = Relationship(back_populates="materials")
 
 
 class VersionSupplier(TimestampMixin, SQLModel, table=True):
-    """The supply chain mapped for a specific product version."""
+    """
+    Supply Chain Map (Tier 1, 2, 3).
+    """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     version_id: uuid.UUID = Field(foreign_key="productversion.id", index=True)
-    supplier_id: Optional[uuid.UUID] = Field(
-        default=None, foreign_key="supplier.id")
-
-    role: SupplierRole = Field(
-        description="Tier/Role for this specific version.")
-    location_display: str = Field(description="City/Region for display.")
+    supplier_id: uuid.UUID = Field(foreign_key="supplier.id")
+    role: SupplierRole
 
     version: ProductVersion = Relationship(back_populates="suppliers")
 
 
 class VersionCertification(TimestampMixin, SQLModel, table=True):
-    """Certificates valid for a specific product version."""
+    """
+    Product-specific proofs (e.g. Transaction Certs).
+    """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     version_id: uuid.UUID = Field(foreign_key="productversion.id", index=True)
     certification_id: Optional[uuid.UUID] = Field(
-        default=None, foreign_key="certification.id")
-
-    license_number: str = Field(description="License/Certificate ID.")
+        foreign_key="certification.id")
+    document_url: str
     valid_until: Optional[date] = None
-    document_url: Optional[str] = Field(
-        default=None, description="Link to PDF proof.")
 
     version: ProductVersion = Relationship(back_populates="certifications")
 
 
 class SparePart(TimestampMixin, SQLModel, table=True):
     """
-    Availability of spare parts for repairability compliance.
+    Right-to-Repair Data.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     product_id: uuid.UUID = Field(foreign_key="product.id")
-
-    part_name: str
+    name: str
     ordering_code: str
-    is_available: bool = True
 
     product: Product = Relationship(back_populates="spare_parts")
+
+# ==========================================
+# 7. COLLABORATION (REQUESTS & COMMENTS)
+# ==========================================
+
+
+class DataContributionRequest(TimestampMixin, SQLModel, table=True):
+    """
+    The 'Job' assigned to the PK Manufacturer.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    connection_id: uuid.UUID = Field(foreign_key="tenantconnection.id")
+
+    brand_tenant_id: uuid.UUID = Field(foreign_key="tenant.id")
+    supplier_tenant_id: uuid.UUID = Field(foreign_key="tenant.id")
+
+    # Version Tracking
+    initial_version_id: uuid.UUID = Field(foreign_key="productversion.id")
+    current_version_id: uuid.UUID = Field(foreign_key="productversion.id")
+
+    status: RequestStatus = Field(default=RequestStatus.SENT)
+
+    comments: List["CollaborationComment"] = Relationship(
+        back_populates="request")
+
+
+class CollaborationComment(TimestampMixin, SQLModel, table=True):
+    """
+    Chat & Rejection Feedback.
+    """
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    request_id: uuid.UUID = Field(
+        foreign_key="datacontributionrequest.id", index=True)
+
+    author_user_id: uuid.UUID = Field(foreign_key="user.id")
+
+    body: str = Field(description="The message content.")
+    is_rejection_reason: bool = Field(
+        default=False, description="Highlights comment if rejecting.")
+
+    request: DataContributionRequest = Relationship(back_populates="comments")
+
+# ==========================================
+# 8. PASSPORT (OUTPUT)
+# ==========================================
 
 
 class DigitalProductPassport(TimestampMixin, SQLModel, table=True):
     """
-    The Digital Twin identity.
+    The Public Digital Twin.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-
-    # NEW: Direct Tenant Link
     tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
-
-    # Enforce 1:1 relationship with Product
     product_id: uuid.UUID = Field(foreign_key="product.id", unique=True)
 
-    # Public Facing Identity
-    public_uid: str = Field(
-        unique=True,
-        index=True,
-        description="Public specific ID (e.g., for GS1 Digital Link path)."
-    )
-
+    public_uid: str = Field(unique=True, index=True)
     status: DPPStatus = Field(default=DPPStatus.DRAFT)
 
-    # Access details
-    qr_code_url: Optional[str] = Field(
-        default=None,
-        description="URL to the stored QR code image (S3/Blob)."
-    )
-    target_url: str = Field(
-        description="The resolved web link where the DPP is hosted."
-    )
+    # Active Pointer
+    active_version_id: Optional[uuid.UUID] = Field(
+        foreign_key="productversion.id")
 
-    # Versioning
-    version: int = Field(
-        default=1, description="Increments on significant data updates.")
-    blockchain_hash: Optional[str] = Field(
-        default=None,
-        description="Optional hash if anchoring data to a blockchain for immutability."
-    )
+    # QR & Hosting
+    qr_code_image_url: Optional[str] = None
+    target_url: str = Field(description="The live link.")
+    style_config: Dict[str, Any] = Field(
+        default={}, sa_column=Field(sa_type=JSON))
 
-    # Relationships
-    # Ensure Tenant model has back_populates="passports"
-    tenant: "Tenant" = Relationship(back_populates="passports")
-    product: "Product" = Relationship(back_populates="passport")
-
-    events: List["DPPEvent"] = Relationship(
-        back_populates="passport",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
-    )
+    product: Product = Relationship(back_populates="passport")
+    events: List["DPPEvent"] = Relationship(back_populates="passport")
     extra_details: List["DPPExtraDetail"] = Relationship(
-        back_populates="passport",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
-    )
+        back_populates="passport", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
 
 class DPPEvent(SQLModel, table=True):
     """
-    Audit Log / Journey for the Passport.
+    Immutable Journey Log.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-
-    # NEW: Direct Tenant Link (Optional for sub-resources, but good for data partitioning)
-    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
-
-    dpp_id: uuid.UUID = Field(
+    passport_id: uuid.UUID = Field(
         foreign_key="digitalproductpassport.id", index=True)
-
-    event_type: DPPEventType
+    event_type: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    location: Optional[str] = None
+    description: Optional[str] = None
 
-    description: Optional[str] = Field(default=None)
-
-    # Location data
-    location: Optional[str] = Field(description="City/Country or GPS coords.")
-
-    # If the action was performed by a logged-in user
-    actor_id: Optional[uuid.UUID] = Field(default=None, foreign_key="user.id")
-
-    tenant: "Tenant" = Relationship(back_populates="dpp_events")
     passport: DigitalProductPassport = Relationship(back_populates="events")
 
 
 class DPPExtraDetail(TimestampMixin, SQLModel, table=True):
     """
-    Key-Value store for Passport-specific attributes.
+    Flexible Attributes (e.g. Marketing, Story).
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenant.id")
+    passport_id: uuid.UUID = Field(foreign_key="digitalproductpassport.id")
 
-    # NEW: Direct Tenant Link
-    tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
+    key: str = Field(index=True)
+    value: str
+    is_public: bool = True
+    display_order: int = 0
 
-    dpp_id: uuid.UUID = Field(foreign_key="digitalproductpassport.id")
-
-    key: str = Field(
-        index=True, description="Display label (e.g. 'Warranty Info').")
-    value: str = Field(description="Content or Link.")
-    is_public: bool = Field(
-        default=True, description="If false, visible only to regulators/auditors.")
-
-    display_order: int = Field(default=0)
-
-    tenant: "Tenant" = Relationship(back_populates="dpp_extra_details")
+    tenant: Tenant = Relationship(back_populates="dpp_extra_details")
     passport: DigitalProductPassport = Relationship(
         back_populates="extra_details")
