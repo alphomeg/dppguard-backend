@@ -2,6 +2,7 @@ from uuid import UUID
 from sqlmodel import SQLModel, Field
 from pydantic import EmailStr, StringConstraints
 from typing_extensions import Annotated
+from app.db.schema import TenantType
 
 
 class UserRead(SQLModel):
@@ -13,49 +14,48 @@ class UserRead(SQLModel):
 
 
 class UserSignin(SQLModel):
-    """
-    Data Transfer Object (DTO) for User Signin.
-    This model validates input before it touches the authentication logic.
-    """
-
     email: Annotated[EmailStr, StringConstraints(to_lower=True)] = Field(
         description="Registered email address of the user.",
-        max_length=255  # Standard DB limit for emails
+        max_length=255
     )
-
     password: str = Field(
         min_length=8,
-        max_length=128,  # Prevent denial of service via long password hashing
+        max_length=128,
         description="Plain text password."
     )
 
 
 class UserCreate(SQLModel):
     """
-    Data Transfer Object (DTO) for User Registration.
-    This model validates input before it touches the database or service layer.
+    DTO for User Registration.
+    Now includes fields to establish the initial Organization (Brand/Supplier/Hybrid).
     """
-
     first_name: str = Field(
         min_length=1,
         max_length=50,
-        description="User's given name. Must be between 1 and 50 characters."
+        description="User's given name."
     )
-
     last_name: str = Field(
         min_length=1,
         max_length=50,
-        description="User's family name. Must be between 1 and 50 characters."
+        description="User's family name."
     )
-
-    # EmailStr automatically validates format (e.g., user@domain.com)
     email: Annotated[EmailStr, StringConstraints(to_lower=True)] = Field(
         description="Unique email address for signin.",
-        max_length=255  # Standard DB limit for emails
+        max_length=255
     )
-
     password: str = Field(
         min_length=8,
-        max_length=128,  # Prevent denial of service via long password hashing
-        description="Plain text password. Must be at least 8 characters."
+        max_length=128,
+        description="Plain text password."
+    )
+
+    # New Fields for Onboarding Flow
+    company_name: str = Field(
+        min_length=2,
+        max_length=100,
+        description="The legal name of the Brand or Supplier organization."
+    )
+    account_type: TenantType = Field(
+        description="The type of account to create: 'brand', 'supplier', or 'hybrid'."
     )

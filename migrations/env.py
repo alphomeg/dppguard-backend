@@ -6,19 +6,7 @@ from sqlalchemy import pool
 from sqlmodel import SQLModel
 from alembic import context
 
-from app.db.schema import (
-    PlanFeatureLink,
-    RolePermissionLink,
-    Feature,
-    SubscriptionPlan,
-    Permission,
-    Role,
-    User,
-    Tenant,
-    TenantSubscription,
-    TenantMember,
-    TenantInvitation,
-)
+from app.db.schema import *
 from dotenv import load_dotenv
 
 

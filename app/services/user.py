@@ -1,12 +1,14 @@
 from typing import Optional
 import uuid
+import re
 import secrets
-from sqlmodel import Session, select
-from loguru import logger
-import jwt
 from datetime import datetime, timedelta
-from fastapi import HTTPException, status
+
+import jwt
 from jwt.exceptions import InvalidTokenError
+from loguru import logger
+from sqlmodel import Session, select
+from fastapi import HTTPException, status
 from pydantic import ValidationError
 
 from app.core.config import settings
@@ -25,45 +27,84 @@ class UserService:
     def __init__(self, session: Session):
         self.session = session
 
-    def _generate_personal_slug(self, first_name: str) -> str:
-        """Generates a URL-safe slug: 'john-workspace-a1b2'."""
-        safe_name = "".join(c for c in first_name.lower()
-                            if c.isalnum()) or "user"
-        suffix = secrets.token_hex(3)
-        return f"{safe_name}-workspace-{suffix}"
+    def _generate_slug(self, name: str) -> str:
+        """
+        Generates a URL-safe slug from the company name.
+        Example: 'Acme Clothing Co.' -> 'acme-clothing-co'
+        """
+        # 1. Lowercase and replace non-alphanumerics with hyphens
+        slug = name.lower()
+        slug = re.sub(r'[^a-z0-9]+', '-', slug)
+        slug = slug.strip('-')
+
+        # 2. Fallback if name was entirely symbols
+        if not slug:
+            slug = "org-" + secrets.token_hex(4)
+
+        return slug
+
+    def _ensure_slug_unique(self, base_slug: str) -> str:
+        """
+        Ensures the slug is unique in the database.
+        If 'acme' exists, tries 'acme-1', 'acme-2', etc.
+        """
+        slug = base_slug
+        counter = 1
+
+        while True:
+            # Check DB for existence
+            statement = select(Tenant).where(Tenant.slug == slug)
+            existing = self.session.exec(statement).first()
+
+            if not existing:
+                return slug
+
+            # If exists, append counter and retry
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+
+            # Safety break to prevent infinite loops in weird edge cases
+            if counter > 100:
+                raise ValueError(
+                    f"Could not generate a unique handle for company '{base_slug}'.")
 
     def _create_jwt(self, subject: str, expires_delta: timedelta, type: str) -> str:
         """Helper to sign JWTs with specific types."""
         to_encode = {
             "sub": str(subject),
             "exp": datetime.utcnow() + expires_delta,
-            "type": type  # Access or Refresh
+            "type": type
         }
         return jwt.encode(to_encode, settings.secret_key, algorithm=self.ALGORITHM)
 
     def get_user_by_id(self, user_id: uuid.UUID) -> Optional[User]:
-        """Retrieves a user by normalized email address."""
         statement = select(User).where(User.id == user_id)
         return self.session.exec(statement).first()
 
     def get_user_by_email(self, email: str) -> Optional[User]:
-        """Retrieves a user by normalized email address."""
         statement = select(User).where(User.email == email)
         return self.session.exec(statement).first()
 
     def get_active_tenant_id(self, user: User) -> uuid.UUID:
         """
-        Helper to resolve which Tenant the user is currently acting in.
+        Resolves which Tenant the user is currently acting in.
+        Strict Mode: The user MUST have an 'active' membership.
         """
+        # 1. Filter for active memberships only
         active_membership = next(
             (m for m in user.memberships if m.status == MemberStatus.ACTIVE),
             None
         )
 
+        # 2. If no active membership exists, deny access.
+        # We do NOT fallback to index 0, as that could be an invited/pending
+        # state or a suspended workspace which should not be accessed.
         if not active_membership:
+            logger.warning(
+                f"Access denied: User {user.id} has no active tenant membership.")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="User does not belong to any active workspace."
+                detail="Your account is not currently active in any workspace."
             )
 
         return active_membership.tenant_id
@@ -71,32 +112,43 @@ class UserService:
     def create_user(self, user_in: UserCreate) -> User:
         """
         Orchestrates the Registration Flow:
-        1. Checks for duplicates.
-        2. Hashes password.
-        3. Creates User.
-        4. Creates Personal Tenant.
-        5. Links User to Tenant as Owner.
-        6. Commits atomically.
+        1. Checks User Email Uniqueness.
+        2. Checks Tenant Name Uniqueness.
+        3. Creates User, Tenant, and Owner Link atomically.
         """
 
-        # 1. Check existence
+        # 1. Check User Existence
         if self.get_user_by_email(user_in.email):
-            raise ValueError("An user with this email already exists.")
+            raise ValueError("A user with this email already exists.")
 
-        # 2. Preparation
+        # 2. Check Organization Name Existence (Strict)
+        # We generally don't want two "Acme Inc" entries confusing the system.
+        existing_tenant = self.session.exec(
+            select(Tenant).where(Tenant.name == user_in.company_name)
+        ).first()
+
+        if existing_tenant:
+            raise ValueError(
+                "An organization with this company name already exists.")
+
+        # 3. Prepare System Data
         hashed_pw = get_password_hash(user_in.password)
 
+        # Get the global Owner role
         owner_role = self.session.exec(
             select(Role).where(Role.name == "Owner", Role.tenant_id == None)
         ).first()
 
         if not owner_role:
             logger.critical(
-                "System misconfiguration: Global 'Owner' role not found.")
-            raise ValueError("System error: Default roles not initialized.")
+                "System Config Error: Global 'Owner' role missing.")
+            raise ValueError(
+                "Registration unavailable: System configuration error.")
 
         try:
-            # 3. Create User Object
+            # --- START ATOMIC TRANSACTION ---
+
+            # A. Create User
             new_user = User(
                 email=user_in.email,
                 hashed_password=hashed_pw,
@@ -105,23 +157,22 @@ class UserService:
                 is_active=True
             )
             self.session.add(new_user)
-            self.session.flush()
+            self.session.flush()  # Generate ID
 
-            # 4. Create Personal Tenant
-            # Logic: Every user gets a "sandbox" where they are the admin.
-            tenant_name = f"{user_in.first_name}'s Workspace"
-            tenant_slug = self._generate_personal_slug(user_in.first_name)
+            # B. Create Tenant (Organization)
+            base_slug = self._generate_slug(user_in.company_name)
+            final_slug = self._ensure_slug_unique(base_slug)
 
             new_tenant = Tenant(
-                name=tenant_name,
-                slug=tenant_slug,
-                type=TenantType.PERSONAL,
+                name=user_in.company_name,
+                slug=final_slug,
+                type=user_in.account_type,
                 status=TenantStatus.ACTIVE,
             )
             self.session.add(new_tenant)
-            self.session.flush()
+            self.session.flush()  # Generate ID
 
-            # 5. Create Membership (Link User <-> Tenant)
+            # C. Create Membership (Owner)
             membership = TenantMember(
                 user_id=new_user.id,
                 tenant_id=new_tenant.id,
@@ -130,27 +181,25 @@ class UserService:
             )
             self.session.add(membership)
 
-            # 6. Atomic Commit
-            # If anything failed above (slug collision, DB constraint),
-            # execution jumps to except, and nothing is saved.
+            # --- COMMIT ---
             self.session.commit()
 
-            # Refresh to load relationships/timestamps if needed
+            # Refresh to load relationships needed for response models
             self.session.refresh(new_user)
 
             logger.info(
-                f"Registered user {new_user.id} and created tenant {new_tenant.id}")
+                f"New Registration: {user_in.account_type} '{new_tenant.name}' created by {new_user.email}"
+            )
             return new_user
 
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Registration failed for {user_in.email}: {str(e)}")
+            logger.error(f"Registration transaction failed: {str(e)}")
+            # Re-raise so the API layer can handle the HTTP response
             raise e
 
     def authenticate_user(self, email: str, password: str) -> Optional[User]:
-        """
-        1. Verify password hash.
-        """
+        """Verify email and password hash."""
         user = self.get_user_by_email(email)
         if not user:
             return None
@@ -159,7 +208,6 @@ class UserService:
         return user
 
     def generate_access_token(self, user: User) -> str:
-        """Generates an Access token for a user."""
         return self._create_jwt(
             subject=user.id,
             expires_delta=timedelta(
@@ -168,73 +216,59 @@ class UserService:
         )
 
     def generate_refresh_token(self, user: User) -> str:
-        """Generates an Access token for a user."""
         return self._create_jwt(
             subject=user.id,
             expires_delta=timedelta(
-                days=settings.refresh_token_expire_minutes),
+                minutes=settings.refresh_token_expire_minutes),
             type="refresh"
         )
 
     def generate_tokens(self, user: User) -> Token:
-        """Generates a pair of Access and Refresh tokens."""
-
-        # 1. Access Token (Short Lived)
-        access_token = self.generate_access_token(user)
-
-        # 2. Refresh Token (Long Lived)
-        refresh_token = self.generate_refresh_token(user)
-
         return Token(
-            access_token=access_token,
-            refresh_token=refresh_token,
+            access_token=self.generate_access_token(user),
+            refresh_token=self.generate_refresh_token(user),
             token_type="bearer"
         )
 
-    def verify_access_token(self, token: str) -> str:
-        payload = jwt.decode(token, settings.secret_key,
-                             algorithms=[self.ALGORITHM])
-        user_id = payload.get("sub")
-        token_type = payload.get("type")
+    def verify_access_token(self, token: str) -> Optional[TokenData]:
+        try:
+            payload = jwt.decode(token, settings.secret_key,
+                                 algorithms=[self.ALGORITHM])
+            user_id = payload.get("sub")
+            token_type = payload.get("type")
 
-        if not user_id:
+            if not user_id or token_type != "access":
+                return None
+
+            return TokenData(user_id=uuid.UUID(user_id))
+        except (jwt.PyJWTError, ValueError):
             return None
 
-        if not token_type:
+    def verify_refresh_token(self, token: str) -> Optional[TokenData]:
+        try:
+            payload = jwt.decode(token, settings.secret_key,
+                                 algorithms=[self.ALGORITHM])
+            user_id = payload.get("sub")
+            token_type = payload.get("type")
+
+            if not user_id or token_type != "refresh":
+                return None
+
+            return TokenData(user_id=uuid.UUID(user_id))
+        except (jwt.PyJWTError, ValueError):
             return None
 
-        if not token_type == "access":
-            return None
-
-        return TokenData(user_id=user_id)
-
-    def verify_refresh_token(self, token: str) -> str:
-        payload = jwt.decode(token, settings.secret_key,
-                             algorithms=[self.ALGORITHM])
-        user_id = payload.get("sub")
-        token_type = payload.get("type")
-
-        if not user_id:
-            return None
-
-        if not token_type:
-            return None
-
-        if not token_type == "refresh":
-            return None
-
-        return TokenData(user_id=user_id)
-
-    def validate_user(self, user_id):
-        """Validates if a user exists and is active."""
+    def validate_user(self, user_id: uuid.UUID) -> Optional[User]:
+        """Retrieves user and checks is_active flag."""
         user = self.get_user_by_id(user_id)
         if not user or not user.is_active:
             return None
         return user
 
-    def refresh_session(self, refresh_token: str) -> Token:
+    def refresh_session(self, refresh_token: str) -> str:
         """
-        Validates the refresh token and issues a new pair.
+        Exchange a valid refresh token for a new access token.
+        Strictly validates the user state before issuing.
         """
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -242,19 +276,15 @@ class UserService:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-        try:
-            # 1. Decode
-            payload = self.verify_refresh_token(refresh_token)
-
-            if not payload:
-                raise credentials_exception
-        except (InvalidTokenError, ValidationError):
+        # 1. Verify Token Signature & Type
+        token_data = self.verify_refresh_token(refresh_token)
+        if not token_data:
             raise credentials_exception
 
-        user = self.validate_user(payload.user_id)
-
+        # 2. Verify User Exists & Is Active
+        user = self.validate_user(token_data.user_id)
         if not user:
             raise credentials_exception
 
-        # 4. Issue New Access Token
+        # 3. Issue New Access Token
         return self.generate_access_token(user)

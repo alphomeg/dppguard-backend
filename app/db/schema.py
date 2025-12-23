@@ -212,7 +212,9 @@ class Tenant(TimestampMixin, SQLModel, table=True):
     # Ownership
     products: List["Product"] = Relationship(back_populates="tenant")
     suppliers: List["Supplier"] = Relationship(
-        back_populates="tenant")  # Address Book
+        back_populates="tenant",
+        sa_relationship_kwargs={"foreign_keys": "[Supplier.tenant_id]"}
+    )
     custom_materials: List["Material"] = Relationship(back_populates="tenant")
 
     # Passport Extras
@@ -252,6 +254,17 @@ class User(TimestampMixin, SQLModel, table=True):
     )
 
     memberships: List["TenantMember"] = Relationship(back_populates="user")
+
+    sent_invitations: List["TenantInvitation"] = Relationship(
+        back_populates="inviter",
+        sa_relationship_kwargs={
+            "foreign_keys": "[TenantInvitation.inviter_id]"}
+    )
+    received_invitations: List["TenantInvitation"] = Relationship(
+        back_populates="invitee",
+        sa_relationship_kwargs={
+            "foreign_keys": "[TenantInvitation.invitee_id]"}
+    )
 
 
 class TenantMember(TimestampMixin, SQLModel, table=True):
@@ -462,7 +475,11 @@ class Supplier(TimestampMixin, SQLModel, table=True):
         description="The ISO 2-letter country code of the supplier. Example: 'PK'"
     )
 
-    tenant: Tenant = Relationship(back_populates="suppliers")
+    tenant: Tenant = Relationship(
+        back_populates="suppliers",
+        sa_relationship_kwargs={"foreign_keys": "Supplier.tenant_id"}
+    )
+
     facility_certs: List["SupplierFacilityCertification"] = Relationship(
         back_populates="supplier")
 
@@ -605,9 +622,9 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
 
     # Media
     media_gallery: List[Dict[str, Any]] = Field(
-        default=[],
-        sa_column=Field(sa_type=JSON),
-        description="A JSON list of media objects (images/videos) associated with this version. Example: [{'type': 'image', 'url': '...'}]"
+        default_factory=list,
+        sa_type=JSON,
+        description="A JSON list of media objects (images/videos)."
     )
 
     # Relationships
@@ -877,8 +894,8 @@ class DigitalProductPassport(TimestampMixin, SQLModel, table=True):
         description="The destination URL where the QR code redirects users. Example: 'https://mybrand.com/traceability/dpp_abc123'"
     )
     style_config: Dict[str, Any] = Field(
-        default={},
-        sa_column=Field(sa_type=JSON),
+        default_factory=dict,
+        sa_type=JSON,
         description="JSON configuration for frontend styling (colors, logos) of the passport page. Example: {'primary_color': '#FF0000'}"
     )
 

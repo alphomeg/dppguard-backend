@@ -3,7 +3,6 @@ from sqlmodel import Session, select
 from app.db.core import engine
 from app.db.schema import (
     Role, Permission, RolePermissionLink,
-    SubscriptionPlan, Feature, PlanFeatureLink
 )
 
 
@@ -134,56 +133,6 @@ def seed_roles(session: Session, perm_map: dict[str, Permission]):
         #         session.delete(link)
 
 
-def seed_plans(session: Session):
-    """Creates default Features and Subscription Plans."""
-    logger.info("--- Seeding Plans & Features ---")
-
-    for plan_data in DEFAULT_PLANS:
-        # 1. Create or Get Plan
-        plan = session.exec(select(SubscriptionPlan).where(
-            SubscriptionPlan.name == plan_data["name"])).first()
-        if not plan:
-            plan = SubscriptionPlan(
-                name=plan_data["name"],
-                price=plan_data["price"],
-                is_personal_only=plan_data["is_personal_only"]
-            )
-            session.add(plan)
-            session.flush()
-            logger.info(f"Created Plan: {plan.name}")
-
-        # 2. Process Features
-        features_config = plan_data["features"]
-        for key, value in features_config.items():
-            # Create Feature if missing
-            feature = session.exec(
-                select(Feature).where(Feature.key == key)).first()
-            if not feature:
-                feature = Feature(key=key, description=f"Controls {key}")
-                session.add(feature)
-                session.flush()
-
-            # Link Plan <-> Feature with Value
-            link = session.exec(
-                select(PlanFeatureLink).where(
-                    PlanFeatureLink.plan_id == plan.id,
-                    PlanFeatureLink.feature_id == feature.id
-                )
-            ).first()
-
-            if not link:
-                link = PlanFeatureLink(
-                    plan_id=plan.id,
-                    feature_id=feature.id,
-                    value=value
-                )
-                session.add(link)
-            elif link.value != value:
-                # Update value if changed in seed config
-                link.value = value
-                session.add(link)
-
-
 def main():
     # Ensure tables exist (if not using Alembic)
     # SQLModel.metadata.create_all(engine)
@@ -195,9 +144,6 @@ def main():
 
             # 2. Roles
             seed_roles(session, perm_map)
-
-            # 3. Plans
-            seed_plans(session)
 
             session.commit()
             logger.info("Database seeding completed successfully.")
