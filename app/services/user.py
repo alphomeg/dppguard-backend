@@ -165,6 +165,7 @@ class UserService:
 
             new_tenant = Tenant(
                 name=user_in.company_name,
+                location_country=user_in.location_country,
                 slug=final_slug,
                 type=user_in.account_type,
                 status=TenantStatus.ACTIVE,

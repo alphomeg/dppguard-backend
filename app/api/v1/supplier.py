@@ -1,0 +1,114 @@
+import uuid
+from app.models.supplier import SupplierProfileUpdate  # Import new model
+from app.models.supplier import PublicTenantRead  # Import new model
+from typing import List
+from fastapi import APIRouter, Depends, status
+from loguru import logger
+
+from app.core.dependencies import get_current_user, get_supplier_service
+from app.models.supplier import SupplierProfileCreate, SupplierProfileRead
+from app.db.schema import User
+
+from app.services.supplier import SupplierService
+
+
+router = APIRouter()
+
+
+@router.get(
+    "/directory/search",
+    response_model=List[PublicTenantRead],
+    summary="Search Supplier Directory",
+    description="Find registered suppliers by name or handle."
+)
+def search_directory(
+    q: str,
+    service: SupplierService = Depends(get_supplier_service),
+    current_user: User = Depends(get_current_user)
+):
+    return service.search_directory(q)
+
+
+@router.get(
+    "/",
+    response_model=List[SupplierProfileRead],
+    status_code=status.HTTP_200_OK,
+    summary="List Supplier Profiles",
+    description=(
+        "Retrieve the address book of suppliers for the current Brand. "
+        "Includes connection status and audit details (e.g., if an email invite was sent)."
+    )
+)
+def list_suppliers(
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    """
+    Fetches all supplier profiles owned by the current user's active Tenant.
+    """
+    return service.list_profiles(current_user)
+
+
+@router.post(
+    "/",
+    response_model=SupplierProfileRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add or Invite a Supplier",
+    description=(
+        "Adds a new entry to the Supplier Address Book. \n\n"
+        "**Modes of Operation:**\n"
+        "1. **Connect by Handle:** Provide `public_handle` (e.g., 'pk-textiles') to request a B2B connection with an existing registered Manufacturer.\n"
+        "2. **Invite by Email:** Provide `invite_email` to send a platform registration invitation to a new supplier.\n\n"
+        "**Note:** You must provide exactly one of these identifiers along with a display `name`."
+    )
+)
+def add_supplier(
+    supplier_in: SupplierProfileCreate,
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    """
+    Orchestrates the creation of a SupplierProfile and the linked TenantConnection.
+    """
+    new_profile = service.add_supplier(current_user, supplier_in)
+
+    logger.info(
+        f"Supplier '{new_profile.name}' added by User {current_user.id} "
+        f"(Status: {new_profile.connection_status})"
+    )
+
+    return new_profile
+
+
+@router.patch(
+    "/{profile_id}",
+    response_model=SupplierProfileRead,
+    summary="Update Supplier Alias",
+    description="Update the internal display name of a supplier."
+)
+def update_supplier(
+    profile_id: uuid.UUID,
+    data: SupplierProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    return service.update_profile(current_user, profile_id, data)
+
+
+@router.delete(
+    "/{profile_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Disconnect or Remove Supplier",
+    description=(
+        "**Logic:**\n"
+        "- If status is `PENDING`: Cancels the invite and removes the entry.\n"
+        "- If status is `CONNECTED`: Breaks the connection (sets to Disconnected) but keeps the profile.\n"
+        "- If status is `DISCONNECTED`: Removes the entry from the address book."
+    )
+)
+def disconnect_supplier(
+    profile_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    return service.disconnect_supplier(current_user, profile_id)

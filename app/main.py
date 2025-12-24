@@ -5,8 +5,9 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import index
 from app.api.v1 import user
+from app.api.v1 import supplier
+
 # from app.api.v1.references import materials
-# from app.api.v1.references import suppliers
 # from app.api.v1.references import certification
 # from app.api.v1 import products
 # from app.api.v1 import dpp
@@ -34,7 +35,8 @@ app.add_middleware(
 
 # Register routes
 app.include_router(index.router, prefix="/api/v1")
-app.include_router(user.router, prefix="/api/v1/user")
+app.include_router(user.router, prefix="/api/v1/users")
+app.include_router(supplier.router, prefix="/api/v1/suppliers")
 
 # # References routes
 # app.include_router(materials.router, prefix="/api/v1/materials")

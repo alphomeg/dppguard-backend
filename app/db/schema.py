@@ -203,6 +203,9 @@ class Tenant(TimestampMixin, SQLModel, table=True):
         description="The operational status of the account. Example: 'active'"
     )
 
+    # very important for supplier
+    location_country: str = Field(description="ISO 2-letter country code.")
+
     # Relationships
     members: List["TenantMember"] = Relationship(back_populates="tenant")
     custom_roles: List["Role"] = Relationship(back_populates="tenant")
@@ -211,9 +214,9 @@ class Tenant(TimestampMixin, SQLModel, table=True):
 
     # Ownership
     products: List["Product"] = Relationship(back_populates="tenant")
-    suppliers: List["Supplier"] = Relationship(
+    supplier_profiles: List["SupplierProfile"] = Relationship(
         back_populates="tenant",
-        sa_relationship_kwargs={"foreign_keys": "[Supplier.tenant_id]"}
+        sa_relationship_kwargs={"foreign_keys": "[SupplierProfile.tenant_id]"}
     )
     custom_materials: List["Material"] = Relationship(back_populates="tenant")
 
@@ -366,32 +369,30 @@ class TenantInvitation(TimestampMixin, SQLModel, table=True):
 
 class TenantConnection(TimestampMixin, SQLModel, table=True):
     """
-    Represents a B2B Handshake/Connection between two Tenants.
-    This facilitates the supply chain graph. For example, 'Brand A' connects to 
-    'Supplier B'. Once 'connected', they can exchange Data Contribution Requests.
+    Represents the handshake state.
     """
-    id: uuid.UUID = Field(
-        default_factory=uuid.uuid4,
-        primary_key=True,
-        description="Unique ID for this B2B relationship."
-    )
-    brand_tenant_id: uuid.UUID = Field(
-        foreign_key="tenant.id",
-        index=True,
-        description="The initiator of the relationship (usually the Brand/Buyer)."
-    )
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+
+    brand_tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
     supplier_tenant_id: Optional[uuid.UUID] = Field(
-        foreign_key="tenant.id",
+        foreign_key="tenant.id", default=None)
+
+    # The Link
+    supplier_profile_id: uuid.UUID = Field(
+        foreign_key="supplierprofile.id",
+        unique=True  # Enforces 1:1
+    )
+
+    # Audit / Transactional Field
+    supplier_email_invite: Optional[str] = Field(
         default=None,
-        description="The target tenant (Supplier). Null if the invitation hasn't been accepted by a real Tenant yet."
+        description="If invited via email, this stores the target address for audit/retry."
     )
-    supplier_email_invite: str = Field(
-        description="The email address used to invite the supplier. Example: 'sales@fabric-mill.pk'"
-    )
-    status: ConnectionStatus = Field(
-        default=ConnectionStatus.PENDING,
-        description="The state of the B2B handshake. Example: 'connected'"
-    )
+
+    status: ConnectionStatus = Field(default=ConnectionStatus.PENDING)
+
+    supplier_profile: "SupplierProfile" = Relationship(
+        back_populates="connection")
 
 
 class Material(TimestampMixin, SQLModel, table=True):
@@ -446,42 +447,45 @@ class Certification(TimestampMixin, SQLModel, table=True):
     )
 
 
-class Supplier(TimestampMixin, SQLModel, table=True):
+class SupplierProfile(TimestampMixin, SQLModel, table=True):
     """
-    Represents an entry in a specific Tenant's 'Address Book'.
-    Unlike the 'Tenant' table (which is an account), this is a Contact Record
-    owned by a Brand. If the Supplier creates their own account, the 
-    'connected_tenant_id' field links this contact card to their real Tenant ID.
+    Represents an entry in a Brand's 'Address Book'.
+    Now purely a shell for Display Name + Location + Link to Real Tenant.
     """
     id: uuid.UUID = Field(
         default_factory=uuid.uuid4,
-        primary_key=True,
-        description="Unique ID for this address book entry."
+        primary_key=True
     )
     tenant_id: uuid.UUID = Field(
         foreign_key="tenant.id",
-        description="The Brand/Tenant that owns this contact record."
-    )  # The Brand
+        description="The Brand that owns this profile."
+    )
+
     connected_tenant_id: Optional[uuid.UUID] = Field(
         foreign_key="tenant.id",
         default=None,
-        description="The UUID of the actual Supplier Tenant account, if they have joined the platform. Example: 'b2b-tenant-uuid'"
+        description="The Real Supplier Tenant (if connected)."
     )
 
     name: str = Field(
-        description="The display name of the supplier in the address book. Example: 'Lahore Fabrics Ltd'"
-    )
-    location_country: str = Field(
-        description="The ISO 2-letter country code of the supplier. Example: 'PK'"
+        description="The Brand's internal alias for this supplier.")
+    location_country: str = Field(description="ISO 2-letter country code.")
+
+    # Relationships
+    tenant: Tenant = Relationship(
+        back_populates="supplier_profiles",
+        sa_relationship_kwargs={"foreign_keys": "SupplierProfile.tenant_id"}
     )
 
-    tenant: Tenant = Relationship(
-        back_populates="suppliers",
-        sa_relationship_kwargs={"foreign_keys": "Supplier.tenant_id"}
+    # 1:1 Relationship to the Connection Status
+    connection: Optional["TenantConnection"] = Relationship(
+        back_populates="supplier_profile",
+        sa_relationship_kwargs={
+            "cascade": "all, delete-orphan", "uselist": False}
     )
 
     facility_certs: List["SupplierFacilityCertification"] = Relationship(
-        back_populates="supplier")
+        back_populates="supplier", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
 
 class SupplierFacilityCertification(TimestampMixin, SQLModel, table=True):
@@ -495,8 +499,8 @@ class SupplierFacilityCertification(TimestampMixin, SQLModel, table=True):
         primary_key=True,
         description="Unique ID for this document record."
     )
-    supplier_id: uuid.UUID = Field(
-        foreign_key="supplier.id",
+    supplier_profile_id: uuid.UUID = Field(
+        foreign_key="supplierprofile.id",
         description="The address book entry this certificate belongs to."
     )
     name: str = Field(
@@ -510,7 +514,7 @@ class SupplierFacilityCertification(TimestampMixin, SQLModel, table=True):
         description="The expiration date of the certificate. Example: '2026-05-20'"
     )
 
-    supplier: Supplier = Relationship(back_populates="facility_certs")
+    supplier: SupplierProfile = Relationship(back_populates="facility_certs")
 
 
 class Product(TimestampMixin, SQLModel, table=True):
@@ -703,8 +707,8 @@ class VersionSupplier(TimestampMixin, SQLModel, table=True):
         index=True,
         description="The Product Version this supplier contributed to."
     )
-    supplier_id: uuid.UUID = Field(
-        foreign_key="supplier.id",
+    supplier_profile_id: uuid.UUID = Field(
+        foreign_key="supplierprofile.id",
         description="Link to the Supplier Address Book entry."
     )
     role: SupplierRole = Field(

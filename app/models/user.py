@@ -56,6 +56,7 @@ class UserCreate(SQLModel):
         max_length=100,
         description="The legal name of the Brand or Supplier organization."
     )
+    location_country: str = Field(min_length=2, max_length=2)
     account_type: TenantType = Field(
         description="The type of account to create: 'brand', 'supplier', or 'hybrid'."
     )

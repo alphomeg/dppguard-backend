@@ -1,8 +1,8 @@
 """initial commit
 
-Revision ID: 8e3974f32426
+Revision ID: a96f359d7496
 Revises: 
-Create Date: 2025-12-23 22:47:50.429165
+Create Date: 2025-12-24 22:41:18.029499
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = '8e3974f32426'
+revision: str = 'a96f359d7496'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -48,6 +48,7 @@ def upgrade() -> None:
     sa.Column('slug', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('type', sa.Enum('BRAND', 'SUPPLIER', 'HYBRID', name='tenanttype'), nullable=False),
     sa.Column('status', sa.Enum('ACTIVE', 'SUSPENDED', 'ARCHIVED', name='tenantstatus'), nullable=False),
+    sa.Column('location_country', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_tenant_name'), 'tenant', ['name'], unique=False)
@@ -100,7 +101,7 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_role_name'), 'role', ['name'], unique=False)
-    op.create_table('supplier',
+    op.create_table('supplierprofile',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
@@ -112,19 +113,6 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
-    op.create_table('tenantconnection',
-    sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('brand_tenant_id', sa.Uuid(), nullable=False),
-    sa.Column('supplier_tenant_id', sa.Uuid(), nullable=True),
-    sa.Column('supplier_email_invite', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-    sa.Column('status', sa.Enum('PENDING', 'CONNECTED', 'DECLINED', 'DISCONNECTED', name='connectionstatus'), nullable=False),
-    sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
-    sa.ForeignKeyConstraint(['supplier_tenant_id'], ['tenant.id'], ),
-    sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index(op.f('ix_tenantconnection_brand_tenant_id'), 'tenantconnection', ['brand_tenant_id'], unique=False)
     op.create_table('productversion',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
@@ -172,13 +160,29 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('supplier_id', sa.Uuid(), nullable=False),
+    sa.Column('supplier_profile_id', sa.Uuid(), nullable=False),
     sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('document_url', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('valid_until', sa.Date(), nullable=True),
-    sa.ForeignKeyConstraint(['supplier_id'], ['supplier.id'], ),
+    sa.ForeignKeyConstraint(['supplier_profile_id'], ['supplierprofile.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_table('tenantconnection',
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('brand_tenant_id', sa.Uuid(), nullable=False),
+    sa.Column('supplier_tenant_id', sa.Uuid(), nullable=True),
+    sa.Column('supplier_profile_id', sa.Uuid(), nullable=False),
+    sa.Column('supplier_email_invite', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('status', sa.Enum('PENDING', 'CONNECTED', 'DECLINED', 'DISCONNECTED', name='connectionstatus'), nullable=False),
+    sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
+    sa.ForeignKeyConstraint(['supplier_profile_id'], ['supplierprofile.id'], ),
+    sa.ForeignKeyConstraint(['supplier_tenant_id'], ['tenant.id'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('supplier_profile_id')
+    )
+    op.create_index(op.f('ix_tenantconnection_brand_tenant_id'), 'tenantconnection', ['brand_tenant_id'], unique=False)
     op.create_table('tenantinvitation',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
@@ -286,9 +290,9 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('version_id', sa.Uuid(), nullable=False),
-    sa.Column('supplier_id', sa.Uuid(), nullable=False),
+    sa.Column('supplier_profile_id', sa.Uuid(), nullable=False),
     sa.Column('role', sa.Enum('TIER_1_ASSEMBLY', 'TIER_2_FABRIC', 'TIER_3_FIBER', name='supplierrole'), nullable=False),
-    sa.ForeignKeyConstraint(['supplier_id'], ['supplier.id'], ),
+    sa.ForeignKeyConstraint(['supplier_profile_id'], ['supplierprofile.id'], ),
     sa.ForeignKeyConstraint(['version_id'], ['productversion.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -359,14 +363,14 @@ def downgrade() -> None:
     op.drop_table('tenantmember')
     op.drop_index(op.f('ix_tenantinvitation_email'), table_name='tenantinvitation')
     op.drop_table('tenantinvitation')
+    op.drop_index(op.f('ix_tenantconnection_brand_tenant_id'), table_name='tenantconnection')
+    op.drop_table('tenantconnection')
     op.drop_table('supplierfacilitycertification')
     op.drop_table('sparepart')
     op.drop_table('rolepermissionlink')
     op.drop_index(op.f('ix_productversion_product_id'), table_name='productversion')
     op.drop_table('productversion')
-    op.drop_index(op.f('ix_tenantconnection_brand_tenant_id'), table_name='tenantconnection')
-    op.drop_table('tenantconnection')
-    op.drop_table('supplier')
+    op.drop_table('supplierprofile')
     op.drop_index(op.f('ix_role_name'), table_name='role')
     op.drop_table('role')
     op.drop_index(op.f('ix_product_tenant_id'), table_name='product')

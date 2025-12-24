@@ -8,8 +8,9 @@ from app.db.core import get_session
 from app.services.user import UserService
 from app.db.schema import User
 
+from app.services.supplier import SupplierService
+
 # from app.services.references.material import MaterialService
-# from app.services.references.supplier import SupplierService
 # from app.services.references.certification import CertificationService
 
 # from app.services.product import ProductService
@@ -28,8 +29,9 @@ def get_user_service(session: Session = Depends(get_session)) -> UserService:
 #     return MaterialService(session=session)
 
 
-# def get_supplier_service(session: Session = Depends(get_session)) -> SupplierService:
-#     return SupplierService(session=session)
+def get_supplier_service(session: Session = Depends(get_session)) -> SupplierService:
+    """Dependency injection for SupplierService."""
+    return SupplierService(session)
 
 
 # def get_certification_service(session: Session = Depends(get_session)) -> CertificationService:
