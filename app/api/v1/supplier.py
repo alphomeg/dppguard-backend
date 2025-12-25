@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, status
 from loguru import logger
 
 from app.core.dependencies import get_current_user, get_supplier_service
-from app.models.supplier import SupplierProfileCreate, SupplierProfileRead
+from app.models.supplier import (
+    SupplierProfileCreate, SupplierProfileRead,
+    InviteDetails, ConnectionResponse, DecisionPayload,
+    SupplierReinvite
+)
 from app.db.schema import User
 
 from app.services.supplier import SupplierService
@@ -47,6 +51,22 @@ def list_suppliers(
     Fetches all supplier profiles owned by the current user's active Tenant.
     """
     return service.list_profiles(current_user)
+
+
+@router.get(
+    "/invitation/{token}",
+    response_model=InviteDetails,
+    summary="Verify Invitation Token",
+    description="Used by the registration page to validate the token and pre-fill the user's email."
+)
+def verify_invitation(
+    token: str,
+    service: SupplierService = Depends(get_supplier_service)
+):
+    """
+    Public endpoint (no auth required) to validate the link code.
+    """
+    return service.validate_invite_token(token)
 
 
 @router.post(
@@ -112,3 +132,42 @@ def disconnect_supplier(
     service: SupplierService = Depends(get_supplier_service)
 ):
     return service.disconnect_supplier(current_user, profile_id)
+
+
+@router.get("/requests/incoming", response_model=List[ConnectionResponse])
+def get_incoming_requests(
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    """
+    Supplier Dashboard: See pending invites from Brands.
+    """
+    return service.list_incoming_requests(current_user)
+
+
+@router.post("/requests/{connection_id}/respond")
+def respond_to_invite(
+    connection_id: uuid.UUID,
+    payload: DecisionPayload,
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    """
+    Supplier Dashboard: Accept or Decline a brand's invitation.
+    """
+    return service.respond_to_request(current_user, connection_id, payload.accept)
+
+
+@router.post(
+    "/{profile_id}/reinvite",
+    response_model=SupplierProfileRead,
+    summary="Resend Invitation",
+    description="Resend an invite to a Pending or Declined supplier. Allows correcting the email and adding a note."
+)
+def resend_invitation(
+    profile_id: uuid.UUID,
+    data: SupplierReinvite,
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    return service.reinvite_supplier(current_user, profile_id, data)

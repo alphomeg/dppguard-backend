@@ -4,6 +4,7 @@ from sqlmodel import SQLModel, Field
 from pydantic import EmailStr, StringConstraints, model_validator
 from typing_extensions import Annotated
 from app.db.schema import ConnectionStatus, TenantType
+from datetime import datetime
 
 
 class SupplierProfileCreate(SQLModel):
@@ -21,6 +22,11 @@ class SupplierProfileCreate(SQLModel):
     invite_email: Optional[Annotated[EmailStr, StringConstraints(to_lower=True)]] = Field(
         default=None,
         description="Invite a new company via email."
+    )
+    request_note: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Personal message to include in the email."
     )
 
     @model_validator(mode='after')
@@ -64,3 +70,43 @@ class SupplierProfileUpdate(SQLModel):
     (handle/email) changes the fundamental entity.
     """
     name: Optional[str] = Field(default=None, min_length=2, max_length=100)
+
+
+class InviteDetails(SQLModel):
+    """
+    Data returned to the frontend when a user clicks an invite link.
+    """
+    email: str
+    brand_name: str
+    brand_handle: str
+
+    # --- NEW FIELDS ---
+    # The name the Brand assigned to you (e.g. "Lahore Fabrics")
+    supplier_name: str
+    supplier_country: str   # The country the Brand assigned
+
+
+class ConnectionResponse(SQLModel):
+    connection_id: UUID
+    brand_name: str
+    invited_at: datetime
+
+
+class DecisionPayload(SQLModel):
+    accept: bool
+
+
+class SupplierReinvite(SQLModel):
+    """
+    Payload for re-sending an invitation.
+    Allows correcting the email or adding a note.
+    """
+    invite_email: Optional[EmailStr] = Field(
+        default=None,
+        description="Correct the email address if it was wrong."
+    )
+    note: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Personal message to include in the email."
+    )

@@ -1,8 +1,8 @@
 """initial commit
 
-Revision ID: a96f359d7496
+Revision ID: fa341b5a0a1b
 Revises: 
-Create Date: 2025-12-24 22:41:18.029499
+Create Date: 2025-12-25 22:09:53.789866
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'a96f359d7496'
+revision: str = 'fa341b5a0a1b'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -175,6 +175,8 @@ def upgrade() -> None:
     sa.Column('supplier_tenant_id', sa.Uuid(), nullable=True),
     sa.Column('supplier_profile_id', sa.Uuid(), nullable=False),
     sa.Column('supplier_email_invite', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('invitation_token', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('request_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('status', sa.Enum('PENDING', 'CONNECTED', 'DECLINED', 'DISCONNECTED', name='connectionstatus'), nullable=False),
     sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
     sa.ForeignKeyConstraint(['supplier_profile_id'], ['supplierprofile.id'], ),
@@ -183,6 +185,7 @@ def upgrade() -> None:
     sa.UniqueConstraint('supplier_profile_id')
     )
     op.create_index(op.f('ix_tenantconnection_brand_tenant_id'), 'tenantconnection', ['brand_tenant_id'], unique=False)
+    op.create_index(op.f('ix_tenantconnection_invitation_token'), 'tenantconnection', ['invitation_token'], unique=True)
     op.create_table('tenantinvitation',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
@@ -363,6 +366,7 @@ def downgrade() -> None:
     op.drop_table('tenantmember')
     op.drop_index(op.f('ix_tenantinvitation_email'), table_name='tenantinvitation')
     op.drop_table('tenantinvitation')
+    op.drop_index(op.f('ix_tenantconnection_invitation_token'), table_name='tenantconnection')
     op.drop_index(op.f('ix_tenantconnection_brand_tenant_id'), table_name='tenantconnection')
     op.drop_table('tenantconnection')
     op.drop_table('supplierfacilitycertification')

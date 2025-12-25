@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     static_dir: Path = Path(__file__).parent.parent.parent / "static"
     public_url: str = "http://localhost:8000"
     public_landing_page_host: str = "http://localhost:5000"
+    public_dashboard_host: str = "http://localhost:3000"
 
 
 settings = Settings()

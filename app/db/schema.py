@@ -389,6 +389,18 @@ class TenantConnection(TimestampMixin, SQLModel, table=True):
         description="If invited via email, this stores the target address for audit/retry."
     )
 
+    invitation_token: Optional[str] = Field(
+        default=None,
+        index=True,
+        unique=True,
+        description="Secure token included in the email link to identify this connection request during registration."
+    )
+
+    request_note: Optional[str] = Field(
+        default=None,
+        description="A note from the Brand explaining the invite or re-invite."
+    )
+
     status: ConnectionStatus = Field(default=ConnectionStatus.PENDING)
 
     supplier_profile: "SupplierProfile" = Relationship(

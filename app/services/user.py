@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from app.core.config import settings
 from app.db.schema import (
     User, Tenant, TenantMember, TenantType,
-    TenantStatus, Role, MemberStatus
+    TenantStatus, Role, MemberStatus, TenantConnection, ConnectionStatus
 )
 from app.models.auth import Token, TokenData
 from app.models.user import UserCreate
@@ -111,39 +111,28 @@ class UserService:
 
     def create_user(self, user_in: UserCreate) -> User:
         """
-        Orchestrates the Registration Flow:
-        1. Checks User Email Uniqueness.
-        2. Checks Tenant Name Uniqueness.
-        3. Creates User, Tenant, and Owner Link atomically.
+        Orchestrates Registration + Invitation Linking.
         """
-
         # 1. Check User Existence
         if self.get_user_by_email(user_in.email):
             raise ValueError("A user with this email already exists.")
 
-        # 2. Check Organization Name Existence (Strict)
-        # We generally don't want two "Acme Inc" entries confusing the system.
+        # 2. Check Organization Name
         existing_tenant = self.session.exec(
             select(Tenant).where(Tenant.name == user_in.company_name)
         ).first()
-
         if existing_tenant:
             raise ValueError(
                 "An organization with this company name already exists.")
 
-        # 3. Prepare System Data
+        # 3. Prepare Data
         hashed_pw = get_password_hash(user_in.password)
-
-        # Get the global Owner role
         owner_role = self.session.exec(
             select(Role).where(Role.name == "Owner", Role.tenant_id == None)
         ).first()
 
         if not owner_role:
-            logger.critical(
-                "System Config Error: Global 'Owner' role missing.")
-            raise ValueError(
-                "Registration unavailable: System configuration error.")
+            raise ValueError("System configuration error: Owner role missing.")
 
         try:
             # --- START ATOMIC TRANSACTION ---
@@ -157,23 +146,23 @@ class UserService:
                 is_active=True
             )
             self.session.add(new_user)
-            self.session.flush()  # Generate ID
+            self.session.flush()
 
-            # B. Create Tenant (Organization)
+            # B. Create Tenant
             base_slug = self._generate_slug(user_in.company_name)
             final_slug = self._ensure_slug_unique(base_slug)
 
             new_tenant = Tenant(
                 name=user_in.company_name,
-                location_country=user_in.location_country,
                 slug=final_slug,
                 type=user_in.account_type,
                 status=TenantStatus.ACTIVE,
+                location_country=user_in.location_country
             )
             self.session.add(new_tenant)
-            self.session.flush()  # Generate ID
+            self.session.flush()  # Need ID for linking
 
-            # C. Create Membership (Owner)
+            # C. Create Owner Membership
             membership = TenantMember(
                 user_id=new_user.id,
                 tenant_id=new_tenant.id,
@@ -182,21 +171,33 @@ class UserService:
             )
             self.session.add(membership)
 
+            # D. LINK PENDING INVITATIONS (The Logic You Requested)
+            # Find any connection requests where the invite email matches this new user
+            pending_invites = self.session.exec(
+                select(TenantConnection)
+                .where(TenantConnection.supplier_email_invite == user_in.email)
+                .where(TenantConnection.status == ConnectionStatus.PENDING)
+            ).all()
+
+            for invite in pending_invites:
+                # We link the real tenant ID now.
+                invite.supplier_tenant_id = new_tenant.id
+                # We do NOT set status to CONNECTED yet.
+                # We keep it PENDING so the Supplier can explicitly "Accept" later.
+                self.session.add(invite)
+                logger.info(
+                    f"Linked new Tenant {new_tenant.id} to Pending Invite {invite.id}")
+
             # --- COMMIT ---
             self.session.commit()
-
-            # Refresh to load relationships needed for response models
             self.session.refresh(new_user)
 
-            logger.info(
-                f"New Registration: {user_in.account_type} '{new_tenant.name}' created by {new_user.email}"
-            )
+            logger.info(f"Registration successful for {new_user.email}")
             return new_user
 
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Registration transaction failed: {str(e)}")
-            # Re-raise so the API layer can handle the HTTP response
+            logger.error(f"Registration failed: {str(e)}")
             raise e
 
     def authenticate_user(self, email: str, password: str) -> Optional[User]:
