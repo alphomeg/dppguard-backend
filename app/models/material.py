@@ -1,26 +1,37 @@
+from typing import Optional
 from uuid import UUID
 from sqlmodel import SQLModel, Field
-from typing_extensions import Optional
 from app.db.schema import MaterialType
 
 
-class MaterialBase(SQLModel):
-    name: str = Field(min_length=1, max_length=100)
-    code: str = Field(min_length=1, max_length=50,
-                      description="ISO or ERP Code")
-    material_type: MaterialType
-
-
-class MaterialCreate(MaterialBase):
-    pass
+class MaterialCreate(SQLModel):
+    """
+    Payload for creating a custom material.
+    """
+    name: str = Field(min_length=2, max_length=100,
+                      description="Material Name (e.g. Recycled Polyester)")
+    code: str = Field(min_length=2, max_length=50,
+                      description="Unique ERP or Standard Code")
+    material_type: MaterialType = Field(description="Category of the material")
 
 
 class MaterialUpdate(SQLModel):
-    name: Optional[str] = None
-    code: Optional[str] = None
+    """
+    Payload for updating a custom material.
+    """
+    name: Optional[str] = Field(default=None, min_length=2, max_length=100)
+    # Code is usually immutable after creation to prevent breaking history,
+    # but can be allowed if needed.
     material_type: Optional[MaterialType] = None
 
 
-class MaterialRead(MaterialBase):
+class MaterialRead(SQLModel):
+    """
+    Response model.
+    """
     id: UUID
-    tenant_id: Optional[UUID] = None  # Null if it's a system material
+    name: str
+    code: str
+    material_type: MaterialType
+    is_system: bool = Field(
+        description="If True, this is a global standard and cannot be edited.")

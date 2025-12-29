@@ -219,6 +219,8 @@ class Tenant(TimestampMixin, SQLModel, table=True):
         sa_relationship_kwargs={"foreign_keys": "[SupplierProfile.tenant_id]"}
     )
     custom_materials: List["Material"] = Relationship(back_populates="tenant")
+    custom_certifications: List["Certification"] = Relationship(
+        back_populates="tenant")
 
     # Passport Extras
     dpp_extra_details: List["DPPExtraDetail"] = Relationship(
@@ -442,21 +444,38 @@ class Material(TimestampMixin, SQLModel, table=True):
 class Certification(TimestampMixin, SQLModel, table=True):
     """
     Represents globally recognized Standards and Certifications.
-    Examples include GOTS, Oeko-Tex Standard 100, Fair Trade, etc.
-    These act as the 'types' of certificates that can be uploaded.
+    Now supports System Global (tenant_id=None) and Tenant Specific definitions.
     """
     id: uuid.UUID = Field(
         default_factory=uuid.uuid4,
         primary_key=True,
         description="Unique ID for the certification type."
     )
+
+    tenant_id: Optional[uuid.UUID] = Field(
+        default=None,
+        foreign_key="tenant.id",
+        description="If Null, this is a System/Global certification visible to everyone. If set, it is private to that Tenant."
+    )
+
     name: str = Field(
-        unique=True,
+        index=True,
         description="The official name of the certification standard. Example: 'Global Organic Textile Standard (GOTS)'"
     )
+
+    code: str = Field(
+        unique=True,
+        index=True,
+        description="Unique standard code. Example: 'CERT-GOTS-V6'"
+    )
+
     issuer: str = Field(
         description="The organization or body that governs this standard. Example: 'Global Standard gGmbH'"
     )
+
+    # Relationship
+    tenant: Optional[Tenant] = Relationship(
+        back_populates="custom_certifications")
 
 
 class SupplierProfile(TimestampMixin, SQLModel, table=True):

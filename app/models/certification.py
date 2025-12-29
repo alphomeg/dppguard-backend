@@ -1,35 +1,35 @@
+from typing import Optional
 from uuid import UUID
 from sqlmodel import SQLModel, Field
-from typing import Optional
 
 
-class CertificationBase(SQLModel):
-    name: str = Field(min_length=1, max_length=100)
-    code: str = Field(min_length=1, max_length=50)
-    issuer: str = Field(min_length=1, max_length=100)
-
-
-class CertificationCreate(CertificationBase):
+class CertificationCreate(SQLModel):
     """
-    Payload for creating a new certification.
-    Inherits all fields from Base as required.
+    Payload for creating a certification.
     """
-    pass
+    name: str = Field(min_length=2, max_length=150,
+                      description="Certification Name")
+    code: str = Field(min_length=2, max_length=50,
+                      description="Unique Code (e.g. CERT-001)")
+    issuer: str = Field(min_length=2, max_length=150,
+                        description="Issuer / Governing Body")
 
 
 class CertificationUpdate(SQLModel):
     """
-    Payload for updating an existing certification.
-    All fields are optional to allow partial updates (PATCH).
+    Payload for updating a custom certification.
     """
-    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    code: Optional[str] = Field(default=None, min_length=1, max_length=50)
-    issuer: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    name: Optional[str] = Field(default=None, min_length=2, max_length=150)
+    issuer: Optional[str] = Field(default=None, min_length=2, max_length=150)
 
 
-class CertificationRead(CertificationBase):
+class CertificationRead(SQLModel):
     """
-    Response model for reading certification details.
+    Response model.
     """
     id: UUID
-    tenant_id: Optional[UUID] = None  # Null if it's a system certification
+    name: str
+    code: str
+    issuer: str
+    is_system: bool = Field(
+        description="If True, this is a global standard and cannot be edited.")

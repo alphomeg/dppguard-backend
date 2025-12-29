@@ -1,8 +1,17 @@
+from typing import Optional
 from uuid import UUID
 from sqlmodel import SQLModel, Field
 from pydantic import EmailStr, StringConstraints
 from typing_extensions import Annotated
 from app.db.schema import TenantType
+
+
+class ActiveTenantRead(SQLModel):
+    id: UUID
+    name: str
+    slug: str
+    type: TenantType
+    location_country: Optional[str] = None
 
 
 class UserRead(SQLModel):
@@ -11,6 +20,9 @@ class UserRead(SQLModel):
     first_name: str
     last_name: str
     is_active: bool
+
+    # This field will hold the details of the CURRENTLY active tenant
+    current_tenant: Optional[ActiveTenantRead] = None
 
 
 class UserSignin(SQLModel):

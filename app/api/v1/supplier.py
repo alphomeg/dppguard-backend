@@ -11,12 +11,54 @@ from app.models.supplier import (
     InviteDetails, ConnectionResponse, DecisionPayload,
     SupplierReinvite
 )
+from app.models.dashboard import (
+    DashboardStats, ConnectionRequestItem, ProductTaskItem
+)
 from app.db.schema import User
 
 from app.services.supplier import SupplierService
 
 
 router = APIRouter()
+
+
+@router.get(
+    "/dashboard/stats",
+    response_model=DashboardStats,
+    summary="Get Dashboard KPIs",
+    description="Returns counts for tasks and connections."
+)
+def get_dashboard_stats(
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    return service.get_dashboard_stats(current_user)
+
+
+@router.get(
+    "/dashboard/requests",
+    response_model=List[ConnectionRequestItem],
+    summary="Get Pending Connection Requests",
+    description="Returns list of brands waiting for connection approval."
+)
+def get_connection_requests(
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    return service.get_connection_requests(current_user)
+
+
+@router.get(
+    "/dashboard/tasks",
+    response_model=List[ProductTaskItem],
+    summary="Get Product Data Tasks",
+    description="Returns list of sustainability data requests assigned to this supplier."
+)
+def get_product_tasks(
+    current_user: User = Depends(get_current_user),
+    service: SupplierService = Depends(get_supplier_service)
+):
+    return service.get_product_tasks(current_user)
 
 
 @router.get(

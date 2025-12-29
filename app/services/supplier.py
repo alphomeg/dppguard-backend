@@ -2,15 +2,17 @@ from typing import List
 import uuid
 import secrets
 from loguru import logger
-from sqlmodel import Session, select, col
+from sqlmodel import Session, select, col, func
 from fastapi import HTTPException
 
 from app.core.config import settings
 from app.db.schema import (
-    User, Tenant, TenantType,
-    SupplierProfile, TenantConnection, ConnectionStatus
+    User, Tenant, TenantType, DataContributionRequest,
+    SupplierProfile, TenantConnection, ConnectionStatus, RequestStatus,
+    Product, ProductVersion
 )
 from app.models.supplier import SupplierProfileCreate, SupplierProfileRead, PublicTenantRead, SupplierProfileUpdate, InviteDetails, SupplierReinvite
+from app.models.dashboard import DashboardStats, ConnectionRequestItem, ProductTaskItem
 
 
 class SupplierService:
@@ -402,33 +404,43 @@ class SupplierService:
         ).first()
 
         if not profile:
-            raise HTTPException(404, "Supplier profile not found.")
+            raise HTTPException(
+                status_code=404, detail="Supplier profile not found.")
 
         conn = profile.connection  # 1:1
 
         # 2. Validation
         if not conn:
             raise HTTPException(
-                400, "Cannot re-invite a supplier with no prior connection record.")
+                status_code=400, detail="Cannot re-invite a supplier with no prior connection record.")
 
         if conn.status == ConnectionStatus.CONNECTED:
             raise HTTPException(
-                400, "Supplier is already connected. No need to re-invite.")
+                status_code=400, detail="Supplier is already connected. No need to re-invite.")
 
-        # 3. Update Logic
-        # If new email provided, update it. Otherwise keep old.
+        # 3. Determine Target / Identity
+        # We check if a new email was provided, or fall back to the old one.
         target_email = data.invite_email or conn.supplier_email_invite
+        target_tenant_id = conn.supplier_tenant_id
 
-        if not target_email:
+        # LOGIC CHANGE:
+        # We only fail if we have NEITHER an email NOR a connected tenant ID.
+        # It is valid to re-invite a Tenant ID without an email (Internal Notification).
+        if not target_email and not target_tenant_id:
             raise HTTPException(
-                400, "No email address available to send invitation.")
+                status_code=400,
+                detail="No email address available. Please provide an email to send the invitation."
+            )
 
-        # Update Connection State
-        conn.supplier_email_invite = target_email
+        # 4. Update Connection State
+        if target_email:
+            conn.supplier_email_invite = target_email  # Update if we have one
+
         conn.request_note = data.note
-        conn.status = ConnectionStatus.PENDING  # Reset to Pending
+        # Reset to Pending so it shows in their dashboard
+        conn.status = ConnectionStatus.PENDING
 
-        # Security: Rotate the token so old links become invalid
+        # Security: Rotate the token (Valid for both email links and API verification)
         new_token = secrets.token_urlsafe(32)
         conn.invitation_token = new_token
 
@@ -436,18 +448,25 @@ class SupplierService:
         self.session.commit()
         self.session.refresh(conn)
 
-        # 4. "Send" Email
-        invite_link = f"{settings.public_dashboard_host}/register?token={new_token}"
+        # 5. Notifications
 
-        print("\n" + "="*60)
-        print(f"🔄 RE-INVITE: Sending to {target_email}")
-        if data.note:
-            print(f"📝 NOTE: {data.note}")
-        print(f"🔗 NEW LINK: {invite_link}")
-        print("="*60 + "\n")
+        # A. Email Notification (If email exists)
+        if target_email:
+            invite_link = f"{settings.public_dashboard_host}/register?token={new_token}"
+            print("\n" + "="*60)
+            print(f"🔄 RE-INVITE (EMAIL): Sending to {target_email}")
+            if data.note:
+                print(f"📝 NOTE: {data.note}")
+            print(f"🔗 LINK: {invite_link}")
+            print("="*60 + "\n")
 
-        # 5. Return Updated Profile View
-        # Resolve handle if they happen to be linked to a tenant but just declined previously
+        # B. System Notification (If Tenant ID exists)
+        if target_tenant_id:
+            # In a real app, you might create a Notification table record here
+            print(
+                f"🔔 RE-INVITE (SYSTEM): Notification queued for Tenant {target_tenant_id}")
+
+        # 6. Return Updated Profile View
         handle_val = None
         if conn.supplier_tenant_id:
             real_tenant = self.session.get(Tenant, conn.supplier_tenant_id)
@@ -460,5 +479,130 @@ class SupplierService:
             location_country=profile.location_country,
             connection_status=conn.status,
             connected_handle=handle_val,
-            audit_invite_email=target_email
+            audit_invite_email=target_email  # Might be None if handle-only
         )
+
+    def get_dashboard_stats(self, user: User) -> DashboardStats:
+        """
+        Calculates KPIs for the Supplier Dashboard.
+        """
+        supplier_id = getattr(user, "_tenant_id", None)
+
+        # 1. Pending Invites
+        pending_invites = self.session.exec(
+            select(func.count(TenantConnection.id))
+            .where(TenantConnection.supplier_tenant_id == supplier_id)
+            .where(TenantConnection.status == ConnectionStatus.PENDING)
+        ).one()
+
+        # 2. Connected Brands
+        connected_brands = self.session.exec(
+            select(func.count(TenantConnection.id))
+            .where(TenantConnection.supplier_tenant_id == supplier_id)
+            .where(TenantConnection.status == ConnectionStatus.CONNECTED)
+        ).one()
+
+        # 3. Task Counts
+        # Active: Sent, In Progress, Changes Requested
+        active_tasks = self.session.exec(
+            select(func.count(DataContributionRequest.id))
+            .where(DataContributionRequest.supplier_tenant_id == supplier_id)
+            .where(DataContributionRequest.status.in_([
+                RequestStatus.SENT,
+                RequestStatus.IN_PROGRESS,
+                RequestStatus.CHANGES_REQUESTED
+            ]))
+        ).one()
+
+        completed_tasks = self.session.exec(
+            select(func.count(DataContributionRequest.id))
+            .where(DataContributionRequest.supplier_tenant_id == supplier_id)
+            .where(DataContributionRequest.status == RequestStatus.COMPLETED)
+        ).one()
+
+        return DashboardStats(
+            pending_invites=pending_invites,
+            active_tasks=active_tasks,
+            completed_tasks=completed_tasks,
+            connected_brands=connected_brands
+        )
+
+    def get_connection_requests(self, user: User) -> List[ConnectionRequestItem]:
+        """
+        Fetches pending B2B invites enriched with Brand details.
+        """
+        supplier_id = getattr(user, "_tenant_id", None)
+
+        statement = (
+            select(TenantConnection, Tenant)
+            .join(Tenant, TenantConnection.brand_tenant_id == Tenant.id)
+            .where(TenantConnection.supplier_tenant_id == supplier_id)
+            .where(TenantConnection.status == ConnectionStatus.PENDING)
+            .order_by(TenantConnection.created_at.desc())
+        )
+
+        results = self.session.exec(statement).all()
+
+        return [
+            ConnectionRequestItem(
+                id=conn.id,
+                brand_name=brand.name,
+                brand_handle=brand.slug,
+                invited_at=conn.created_at,
+                note=conn.request_note
+            )
+            for conn, brand in results
+        ]
+
+    def get_product_tasks(self, user: User) -> List[ProductTaskItem]:
+        """
+        Fetches data requests enriched with Product, Version, and Brand details.
+        Also calculates a simple completion percentage.
+        """
+        supplier_id = getattr(user, "_tenant_id", None)
+
+        # Join Path: Request -> ProductVersion (Current) -> Product -> Tenant (Brand)
+        statement = (
+            select(DataContributionRequest, ProductVersion, Product, Tenant)
+            .join(ProductVersion, DataContributionRequest.current_version_id == ProductVersion.id)
+            .join(Product, ProductVersion.product_id == Product.id)
+            .join(Tenant, DataContributionRequest.brand_tenant_id == Tenant.id)
+            .where(DataContributionRequest.supplier_tenant_id == supplier_id)
+            .order_by(DataContributionRequest.updated_at.desc())
+        )
+
+        results = self.session.exec(statement).all()
+
+        tasks = []
+        for req, version, product, brand in results:
+
+            # Simple Logic to calculate % based on filled fields
+            # You can make this more complex based on specific requirements
+            fields_to_check = [
+                version.manufacturing_country,
+                version.total_carbon_footprint_kg,
+                version.total_water_usage_liters,
+                version.total_energy_mj,
+                version.recycling_instructions
+            ]
+            filled_fields = len(
+                [f for f in fields_to_check if f is not None and f != ""])
+            total_fields = len(fields_to_check)
+            progress = int((filled_fields / total_fields) * 100)
+
+            # Mock Due Date: In reality, add 'due_date' to DataContributionRequest schema
+            # For now, let's say due date is 14 days after creation
+            mock_due_date = req.created_at  # + timedelta(days=14)
+
+            tasks.append(ProductTaskItem(
+                id=req.id,
+                product_name=version.product_name_display or "Untitled Product",
+                sku=product.sku,
+                brand_name=brand.name,
+                status=req.status,
+                completion_percent=progress,
+                due_date=mock_due_date,
+                created_at=req.created_at
+            ))
+
+        return tasks
