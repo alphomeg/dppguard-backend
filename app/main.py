@@ -8,6 +8,8 @@ from app.api.v1 import user
 from app.api.v1 import supplier
 from app.api.v1 import material
 from app.api.v1 import certification
+from app.api.v1 import product
+from app.api.v1 import collaboration
 
 
 from app.core.config import settings
@@ -38,6 +40,17 @@ app.include_router(
     material.router, prefix="/api/v1/materials", tags=["Materials"])
 app.include_router(certification.router,
                    prefix="/api/v1/certifications", tags=["Certifications"])
+app.include_router(
+    product.router,
+    prefix="/api/v1/products",
+    tags=["Products"]
+)
+app.include_router(
+    collaboration.router,
+    prefix="/api/v1/collaboration",
+    tags=["Collaboration Workflow"]
+)
+
 
 # Static files serving
 app.mount("/static", StaticFiles(directory=settings.static_dir), name="static")

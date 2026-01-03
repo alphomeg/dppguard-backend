@@ -429,6 +429,10 @@ class Material(TimestampMixin, SQLModel, table=True):
         index=True,
         description="Common name of the material. Example: 'Organic Cotton'"
     )
+    description: Optional[str] = Field(
+        default=None,
+        description="Additional details about composition, origin, etc."
+    )
     code: str = Field(
         unique=True,
         index=True,
@@ -461,6 +465,11 @@ class Certification(TimestampMixin, SQLModel, table=True):
     name: str = Field(
         index=True,
         description="The official name of the certification standard. Example: 'Global Organic Textile Standard (GOTS)'"
+    )
+
+    description: Optional[str] = Field(
+        default=None,
+        description="Notes about validity, scope, or renewal."
     )
 
     code: str = Field(
@@ -500,6 +509,12 @@ class SupplierProfile(TimestampMixin, SQLModel, table=True):
 
     name: str = Field(
         description="The Brand's internal alias for this supplier.")
+
+    description: Optional[str] = Field(
+        default=None,
+        description="Internal notes, capabilities, or details about this supplier."
+    )
+
     location_country: str = Field(description="ISO 2-letter country code.")
 
     # Relationships
@@ -609,6 +624,10 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
         default=None,
         description="If this version was cloned from a previous one, this links to the source. Example: 'uuid-v1'"
     )
+    # The label for this specific batch/release (from frontend 'version_name')
+    version_name: str = Field(
+        description="User label for this version. Example: 'Spring 2025 Release'"
+    )
     version_number: int = Field(
         default=1,
         description="Incremental integer tracking the iteration count. Example: 2"
@@ -626,9 +645,23 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
         description="A summary of what changed in this version compared to the last. Example: 'Updated cotton supplier to reduce carbon footprint.'"
     )
 
+    # SNAPSHOT OF PRODUCT DETAILS
+    product_name: str = Field(
+        description="The marketing name at the time of this version. Example: 'Eco Tee v1'"
+    )
+
+    category: str = Field(
+        description="Product category. Example: 'apparel', 'footwear'."
+    )
+
+    description: Optional[str] = Field(
+        default=None,
+        description="Detailed description for this specific version."
+    )
+
     # ENVIRONMENT DATA
-    manufacturing_country: str = Field(
-        default="PK",
+    manufacturing_country: Optional[str] = Field(
+        default=None,
         description="ISO code of the country where final assembly occurred. Example: 'PK'"
     )
 
@@ -650,26 +683,53 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
         description="A classification code indicating ease of recycling. Example: 'Class A'"
     )
 
-    # Display Data
-    product_name_display: str = Field(
-        description="The marketing name of the product specific to this version. Example: 'Summer Breeze Cotton Tee'"
-    )
-
-    # Media
-    media_gallery: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        sa_type=JSON,
-        description="A JSON list of media objects (images/videos)."
-    )
-
     # Relationships
     product: Product = Relationship(back_populates="versions")
+    media: List["ProductVersionMedia"] = Relationship(
+        back_populates="version",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
     materials: List["VersionMaterial"] = Relationship(
         back_populates="version", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     suppliers: List["VersionSupplier"] = Relationship(
         back_populates="version", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
     certifications: List["VersionCertification"] = Relationship(
         back_populates="version", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+
+
+class ProductVersionMedia(TimestampMixin, SQLModel, table=True):
+    """
+    Represents the visual assets for a specific version.
+    Separating this into a table allows for explicit ordering and 'is_main' logic,
+    which mirrors the frontend's ability to reorder/select images.
+    """
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        primary_key=True
+    )
+    version_id: uuid.UUID = Field(
+        foreign_key="productversion.id",
+        index=True
+    )
+
+    file_url: str = Field(
+        description="The hosted URL of the image. Example: 'https://s3.../img1.jpg'"
+    )
+
+    is_main: bool = Field(
+        default=False,
+        description="Flag for the primary thumbnail. Only 1 per version should be True."
+    )
+
+    display_order: int = Field(
+        default=0,
+        description="frontend index for sorting images."
+    )
+
+    # Optional: Track file metadata if needed
+    file_type: Optional[str] = Field(default="image")
+
+    version: "ProductVersion" = Relationship(back_populates="media")
 
 
 class VersionMaterial(TimestampMixin, SQLModel, table=True):
@@ -738,10 +798,18 @@ class VersionSupplier(TimestampMixin, SQLModel, table=True):
         index=True,
         description="The Product Version this supplier contributed to."
     )
-    supplier_profile_id: uuid.UUID = Field(
+
+    # MODIFIED: Made Optional to allow free-text entry
+    supplier_profile_id: Optional[uuid.UUID] = Field(
+        default=None,
         foreign_key="supplierprofile.id",
-        description="Link to the Supplier Address Book entry."
+        description="Link to the Address Book. If None, use unlisted fields."
     )
+
+    # NEW FIELDS for free-text inputs seen in SupplierContributionPage
+    unlisted_supplier_name: Optional[str] = Field(default=None)
+    unlisted_supplier_country: Optional[str] = Field(default=None)
+
     role: SupplierRole = Field(
         description="The specific function performed by this supplier in the chain. Example: 'tier_1_assembly'"
     )
@@ -838,6 +906,17 @@ class DataContributionRequest(TimestampMixin, SQLModel, table=True):
     current_version_id: uuid.UUID = Field(
         foreign_key="productversion.id",
         description="The active version currently being edited/reviewed. Example: 'uuid-v2'"
+    )
+
+    # NEW FIELDS
+    due_date: Optional[date] = Field(
+        default=None,
+        description="The deadline for the supplier to submit data."
+    )
+
+    request_note: Optional[str] = Field(
+        default=None,
+        description="The initial instruction sent by the brand when creating the request."
     )
 
     status: RequestStatus = Field(

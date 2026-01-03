@@ -1,8 +1,8 @@
 """initial commit
 
-Revision ID: 8af7afc996b1
+Revision ID: 3541736db17b
 Revises: 
-Create Date: 2025-12-29 23:54:05.573988
+Create Date: 2026-01-04 00:04:47.866734
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = '8af7afc996b1'
+revision: str = '3541736db17b'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -62,6 +62,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('tenant_id', sa.Uuid(), nullable=True),
     sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('code', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('issuer', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
@@ -75,6 +76,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('tenant_id', sa.Uuid(), nullable=True),
     sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('code', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('material_type', sa.Enum('COTTON', 'POLYESTER', 'NYLON', 'WOOL', 'VISCOSE', 'BLEND', 'OTHER', name='materialtype'), nullable=False),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
@@ -112,6 +114,7 @@ def upgrade() -> None:
     sa.Column('tenant_id', sa.Uuid(), nullable=False),
     sa.Column('connected_tenant_id', sa.Uuid(), nullable=True),
     sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('location_country', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.ForeignKeyConstraint(['connected_tenant_id'], ['tenant.id'], ),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
@@ -123,18 +126,20 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('product_id', sa.Uuid(), nullable=False),
     sa.Column('parent_version_id', sa.Uuid(), nullable=True),
+    sa.Column('version_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('version_number', sa.Integer(), nullable=False),
     sa.Column('status', sa.Enum('WORKING_DRAFT', 'SUBMITTED', 'REVISION_REQUIRED', 'APPROVED', 'PUBLISHED', 'ARCHIVED', name='versionstatus'), nullable=False),
     sa.Column('created_by_tenant_id', sa.Uuid(), nullable=False),
     sa.Column('change_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('manufacturing_country', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('product_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('category', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('manufacturing_country', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('total_carbon_footprint_kg', sa.Float(), nullable=True),
     sa.Column('total_water_usage_liters', sa.Float(), nullable=True),
     sa.Column('total_energy_mj', sa.Float(), nullable=True),
     sa.Column('recycling_instructions', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('recyclability_class', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('product_name_display', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-    sa.Column('media_gallery', sa.JSON(), nullable=False),
     sa.ForeignKeyConstraint(['created_by_tenant_id'], ['tenant.id'], ),
     sa.ForeignKeyConstraint(['parent_version_id'], ['productversion.id'], ),
     sa.ForeignKeyConstraint(['product_id'], ['product.id'], ),
@@ -234,6 +239,8 @@ def upgrade() -> None:
     sa.Column('supplier_tenant_id', sa.Uuid(), nullable=False),
     sa.Column('initial_version_id', sa.Uuid(), nullable=False),
     sa.Column('current_version_id', sa.Uuid(), nullable=False),
+    sa.Column('due_date', sa.Date(), nullable=True),
+    sa.Column('request_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('status', sa.Enum('SENT', 'ACCEPTED', 'DECLINED', 'IN_PROGRESS', 'SUBMITTED', 'CHANGES_REQUESTED', 'COMPLETED', name='requeststatus'), nullable=False),
     sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
     sa.ForeignKeyConstraint(['connection_id'], ['tenantconnection.id'], ),
@@ -262,6 +269,19 @@ def upgrade() -> None:
     )
     op.create_index(op.f('ix_digitalproductpassport_public_uid'), 'digitalproductpassport', ['public_uid'], unique=True)
     op.create_index(op.f('ix_digitalproductpassport_tenant_id'), 'digitalproductpassport', ['tenant_id'], unique=False)
+    op.create_table('productversionmedia',
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('version_id', sa.Uuid(), nullable=False),
+    sa.Column('file_url', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('is_main', sa.Boolean(), nullable=False),
+    sa.Column('display_order', sa.Integer(), nullable=False),
+    sa.Column('file_type', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.ForeignKeyConstraint(['version_id'], ['productversion.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_productversionmedia_version_id'), 'productversionmedia', ['version_id'], unique=False)
     op.create_table('versioncertification',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
@@ -297,7 +317,9 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('version_id', sa.Uuid(), nullable=False),
-    sa.Column('supplier_profile_id', sa.Uuid(), nullable=False),
+    sa.Column('supplier_profile_id', sa.Uuid(), nullable=True),
+    sa.Column('unlisted_supplier_name', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('unlisted_supplier_country', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('role', sa.Enum('TIER_1_ASSEMBLY', 'TIER_2_FABRIC', 'TIER_3_FIBER', name='supplierrole'), nullable=False),
     sa.ForeignKeyConstraint(['supplier_profile_id'], ['supplierprofile.id'], ),
     sa.ForeignKeyConstraint(['version_id'], ['productversion.id'], ),
@@ -361,6 +383,8 @@ def downgrade() -> None:
     op.drop_table('versionmaterial')
     op.drop_index(op.f('ix_versioncertification_version_id'), table_name='versioncertification')
     op.drop_table('versioncertification')
+    op.drop_index(op.f('ix_productversionmedia_version_id'), table_name='productversionmedia')
+    op.drop_table('productversionmedia')
     op.drop_index(op.f('ix_digitalproductpassport_tenant_id'), table_name='digitalproductpassport')
     op.drop_index(op.f('ix_digitalproductpassport_public_uid'), table_name='digitalproductpassport')
     op.drop_table('digitalproductpassport')
