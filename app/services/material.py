@@ -51,6 +51,8 @@ class MaterialService:
                 id=m.id,
                 name=m.name,
                 code=m.code,
+                # MAP NEW FIELD
+                description=m.description,
                 material_type=m.material_type,
                 is_system=(m.tenant_id is None)
             )
@@ -78,6 +80,8 @@ class MaterialService:
             tenant_id=tenant_id,  # Link to creator
             name=data.name,
             code=data.code,
+            # MAP NEW FIELD
+            description=data.description,
             material_type=data.material_type
         )
 
@@ -90,6 +94,7 @@ class MaterialService:
                 id=material.id,
                 name=material.name,
                 code=material.code,
+                description=material.description,  # Return it
                 material_type=material.material_type,
                 is_system=False
             )
@@ -118,6 +123,12 @@ class MaterialService:
         if data.material_type:
             material.material_type = data.material_type
 
+        # UPDATE LOGIC FOR DESCRIPTION
+        # We use 'is not None' to allow clearing the description (sending empty string) if desired,
+        # or just updating it.
+        if data.description is not None:
+            material.description = data.description
+
         self.session.add(material)
         self.session.commit()
         self.session.refresh(material)
@@ -126,6 +137,7 @@ class MaterialService:
             id=material.id,
             name=material.name,
             code=material.code,
+            description=material.description,  # Return it
             material_type=material.material_type,
             is_system=False
         )
@@ -143,13 +155,6 @@ class MaterialService:
                 status_code=403,
                 detail="You cannot delete System Materials."
             )
-
-        # Check for usage (Foreign Key Constraint protection)
-        # Ideally, check if used in any ProductVersions before deleting
-        # But SQLModel/SQLAlchemy will likely throw IntegrityError if we don't.
-        # For better UX, we can pre-check:
-        # used_in_bom = session.exec(select(VersionMaterial).where(material_id=id)).first()
-        # if used_in_bom: raise 400 "Cannot delete material used in products."
 
         try:
             self.session.delete(material)

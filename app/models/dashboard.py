@@ -1,12 +1,10 @@
-from typing import Optional
 from uuid import UUID
 from datetime import datetime
+from typing import Optional
 from sqlmodel import SQLModel
-from app.db.schema import RequestStatus
 
 
 class DashboardStats(SQLModel):
-    """KPIs for the top of the dashboard"""
     pending_invites: int
     active_tasks: int
     completed_tasks: int
@@ -14,7 +12,6 @@ class DashboardStats(SQLModel):
 
 
 class ConnectionRequestItem(SQLModel):
-    """For the 'Connection Requests' list"""
     id: UUID
     brand_name: str
     brand_handle: str
@@ -23,12 +20,12 @@ class ConnectionRequestItem(SQLModel):
 
 
 class ProductTaskItem(SQLModel):
-    """For the 'Product Assignments' DataGrid"""
-    id: UUID                    # Request ID
+    id: UUID
     product_name: str
-    sku: str
+    version_name: str  # Matches the "Brand & Version" column in UI
+    sku: Optional[str]
     brand_name: str
-    status: RequestStatus
+    status: str
     completion_percent: int
-    due_date: Optional[datetime] = None
+    due_date: datetime
     created_at: datetime

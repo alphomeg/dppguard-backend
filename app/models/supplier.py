@@ -12,6 +12,14 @@ class SupplierProfileCreate(SQLModel):
     Input: Brand provides Name + (Handle OR Email).
     """
     name: str = Field(min_length=2, max_length=100)
+
+    # NEW FIELD
+    description: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Internal notes, capabilities, or details about this supplier."
+    )
+
     location_country: str = Field(min_length=2, max_length=2)
 
     # Identification Options
@@ -43,6 +51,10 @@ class SupplierProfileRead(SQLModel):
     """
     id: UUID
     name: str
+
+    # NEW FIELD
+    description: Optional[str]
+
     location_country: str
 
     # Computed / Joined Fields
@@ -66,10 +78,13 @@ class PublicTenantRead(SQLModel):
 class SupplierProfileUpdate(SQLModel):
     """
     Payload for updating a supplier alias.
-    We restrict this to 'name' because changing the country or identity 
+    We restrict this to 'name' and 'description' because changing the country or identity 
     (handle/email) changes the fundamental entity.
     """
     name: Optional[str] = Field(default=None, min_length=2, max_length=100)
+
+    # NEW FIELD
+    description: Optional[str] = Field(default=None, max_length=500)
 
 
 class InviteDetails(SQLModel):

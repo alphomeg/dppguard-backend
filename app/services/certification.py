@@ -1,8 +1,8 @@
-from typing import List, Optional
 import uuid
+from typing import List, Optional
 from loguru import logger
 from sqlmodel import Session, select, or_, col
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 
 from app.db.schema import User, Tenant, Certification
 from app.models.certification import CertificationCreate, CertificationUpdate, CertificationRead
@@ -50,6 +50,8 @@ class CertificationService:
                 name=c.name,
                 code=c.code,
                 issuer=c.issuer,
+                # MAP NEW FIELD
+                description=c.description,
                 is_system=(c.tenant_id is None)
             )
             for c in results
@@ -76,7 +78,9 @@ class CertificationService:
             tenant_id=tenant_id,
             name=data.name,
             code=data.code,
-            issuer=data.issuer
+            issuer=data.issuer,
+            # SAVE NEW FIELD
+            description=data.description
         )
 
         try:
@@ -89,6 +93,8 @@ class CertificationService:
                 name=cert.name,
                 code=cert.code,
                 issuer=cert.issuer,
+                # RETURN IT
+                description=cert.description,
                 is_system=False
             )
         except Exception as e:
@@ -115,6 +121,10 @@ class CertificationService:
         if data.issuer:
             cert.issuer = data.issuer
 
+        # UPDATE LOGIC FOR DESCRIPTION
+        if data.description is not None:
+            cert.description = data.description
+
         self.session.add(cert)
         self.session.commit()
         self.session.refresh(cert)
@@ -124,6 +134,8 @@ class CertificationService:
             name=cert.name,
             code=cert.code,
             issuer=cert.issuer,
+            # RETURN IT
+            description=cert.description,
             is_system=False
         )
 

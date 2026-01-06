@@ -52,8 +52,6 @@ class SupplierService:
 
                 # If actually connected to a Tenant, fetch the Handle
                 if conn.supplier_tenant_id:
-                    # In high-perf scenarios, use a JOIN in the main query.
-                    # Here we lazily load for clarity.
                     real_tenant = self.session.get(
                         Tenant, conn.supplier_tenant_id)
                     if real_tenant:
@@ -62,6 +60,8 @@ class SupplierService:
             results.append(SupplierProfileRead(
                 id=p.id,
                 name=p.name,
+                # MAP NEW FIELD
+                description=p.description,
                 location_country=p.location_country,
                 connection_status=status_val,
                 connected_handle=handle_val,
@@ -111,6 +111,8 @@ class SupplierService:
                 tenant_id=brand_id,
                 connected_tenant_id=target_tenant_id,
                 name=data.name,
+                # SAVE NEW FIELD
+                description=data.description,
                 location_country=data.location_country
             )
             self.session.add(profile)
@@ -164,6 +166,8 @@ class SupplierService:
             return SupplierProfileRead(
                 id=profile.id,
                 name=profile.name,
+                # RETURN IT
+                description=profile.description,
                 location_country=profile.location_country,
                 connection_status=conn.status,
                 connected_handle=target_tenant_slug,
@@ -220,8 +224,11 @@ class SupplierService:
             raise HTTPException(
                 status_code=404, detail="Supplier profile not found.")
 
-        # 2. Duplicate Name Check (if renaming)
+        # 2. Update Fields (Name & Description)
+        is_updated = False
+
         if data.name and data.name != profile.name:
+            # Duplicate Check only if name changes
             existing = self.session.exec(
                 select(SupplierProfile)
                 .where(SupplierProfile.tenant_id == brand_id)
@@ -230,14 +237,20 @@ class SupplierService:
             if existing:
                 raise HTTPException(
                     status_code=409, detail="A supplier with this name already exists.")
-
             profile.name = data.name
+            is_updated = True
+
+        # UPDATE LOGIC FOR DESCRIPTION
+        if data.description is not None:
+            profile.description = data.description
+            is_updated = True
+
+        if is_updated:
             self.session.add(profile)
             self.session.commit()
             self.session.refresh(profile)
 
         # 3. Return formatted response
-        # (Re-using logic to fetch connection details for the Read model)
         conn = profile.connection
         handle_val = None
 
@@ -249,6 +262,8 @@ class SupplierService:
         return SupplierProfileRead(
             id=profile.id,
             name=profile.name,
+            # RETURN IT
+            description=profile.description,
             location_country=profile.location_country,
             connection_status=conn.status if conn else ConnectionStatus.DISCONNECTED,
             connected_handle=handle_val,
@@ -476,6 +491,8 @@ class SupplierService:
         return SupplierProfileRead(
             id=profile.id,
             name=profile.name,
+            # RETURN IT
+            description=profile.description,
             location_country=profile.location_country,
             connection_status=conn.status,
             connected_handle=handle_val,
@@ -488,29 +505,23 @@ class SupplierService:
         """
         supplier_id = getattr(user, "_tenant_id", None)
 
-        # 1. Pending Invites
         pending_invites = self.session.exec(
             select(func.count(TenantConnection.id))
             .where(TenantConnection.supplier_tenant_id == supplier_id)
             .where(TenantConnection.status == ConnectionStatus.PENDING)
         ).one()
 
-        # 2. Connected Brands
         connected_brands = self.session.exec(
             select(func.count(TenantConnection.id))
             .where(TenantConnection.supplier_tenant_id == supplier_id)
             .where(TenantConnection.status == ConnectionStatus.CONNECTED)
         ).one()
 
-        # 3. Task Counts
-        # Active: Sent, In Progress, Changes Requested
         active_tasks = self.session.exec(
             select(func.count(DataContributionRequest.id))
             .where(DataContributionRequest.supplier_tenant_id == supplier_id)
             .where(DataContributionRequest.status.in_([
-                RequestStatus.SENT,
-                RequestStatus.IN_PROGRESS,
-                RequestStatus.CHANGES_REQUESTED
+                RequestStatus.SENT, RequestStatus.IN_PROGRESS, RequestStatus.CHANGES_REQUESTED
             ]))
         ).one()
 
@@ -555,13 +566,9 @@ class SupplierService:
         ]
 
     def get_product_tasks(self, user: User) -> List[ProductTaskItem]:
-        """
-        Fetches data requests enriched with Product, Version, and Brand details.
-        Also calculates a simple completion percentage.
-        """
         supplier_id = getattr(user, "_tenant_id", None)
 
-        # Join Path: Request -> ProductVersion (Current) -> Product -> Tenant (Brand)
+        # Join: Request -> Version -> Product -> Brand(Tenant)
         statement = (
             select(DataContributionRequest, ProductVersion, Product, Tenant)
             .join(ProductVersion, DataContributionRequest.current_version_id == ProductVersion.id)
@@ -575,9 +582,7 @@ class SupplierService:
 
         tasks = []
         for req, version, product, brand in results:
-
-            # Simple Logic to calculate % based on filled fields
-            # You can make this more complex based on specific requirements
+            # Calculate Completion %
             fields_to_check = [
                 version.manufacturing_country,
                 version.total_carbon_footprint_kg,
@@ -585,18 +590,19 @@ class SupplierService:
                 version.total_energy_mj,
                 version.recycling_instructions
             ]
-            filled_fields = len(
+            filled = len(
                 [f for f in fields_to_check if f is not None and f != ""])
-            total_fields = len(fields_to_check)
-            progress = int((filled_fields / total_fields) * 100)
+            total = len(fields_to_check)
+            progress = int((filled / total) * 100) if total > 0 else 0
 
-            # Mock Due Date: In reality, add 'due_date' to DataContributionRequest schema
-            # For now, let's say due date is 14 days after creation
-            mock_due_date = req.created_at  # + timedelta(days=14)
+            # Mock Due Date (Created + 14 days) or use actual due_date if set
+            mock_due_date = req.due_date if req.due_date else req.created_at
 
             tasks.append(ProductTaskItem(
                 id=req.id,
-                product_name=version.product_name_display or "Untitled Product",
+                # FIXED: Used version.product_name instead of product.name
+                product_name=version.product_name,
+                version_name=version.version_name,
                 sku=product.sku,
                 brand_name=brand.name,
                 status=req.status,

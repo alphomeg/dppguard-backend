@@ -14,6 +14,13 @@ class CertificationCreate(SQLModel):
     issuer: str = Field(min_length=2, max_length=150,
                         description="Issuer / Governing Body")
 
+    # NEW FIELD
+    description: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Notes about validity, scope, or renewal."
+    )
+
 
 class CertificationUpdate(SQLModel):
     """
@@ -21,6 +28,9 @@ class CertificationUpdate(SQLModel):
     """
     name: Optional[str] = Field(default=None, min_length=2, max_length=150)
     issuer: Optional[str] = Field(default=None, min_length=2, max_length=150)
+
+    # NEW FIELD
+    description: Optional[str] = Field(default=None, max_length=500)
 
 
 class CertificationRead(SQLModel):
@@ -31,5 +41,9 @@ class CertificationRead(SQLModel):
     name: str
     code: str
     issuer: str
+
+    # NEW FIELD
+    description: Optional[str]
+
     is_system: bool = Field(
         description="If True, this is a global standard and cannot be edited.")
