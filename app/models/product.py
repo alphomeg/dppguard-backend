@@ -4,139 +4,142 @@ from uuid import UUID
 from sqlmodel import SQLModel, Field
 from app.db.schema import VersionStatus, ProductVersionMedia, VersionMaterial, VersionSupplier, VersionCertification
 
+# --- CREATE / UPLOAD MODELS ---
+
 
 class ProductImageCreate(SQLModel):
-    """
-    Represents an image being uploaded during creation.
-    Since we are not using S3 yet, 'file_data' will hold the Base64 string.
-    """
     file_data: str = Field(description="Base64 encoded string or URL")
     is_main: bool = Field(default=False)
     display_order: int = Field(default=0)
 
 
 class ProductCreate(SQLModel):
-    """
-    Payload for creating the Product Shell + Initial Version.
-    Matches the frontend Formik values.
-    """
-    # Immutable (Product Table)
-    sku: str = Field(min_length=2, description="Stock Keeping Unit")
-    gtin: Optional[str] = Field(default=None, description="EAN/UPC Barcode")
-
-    # Mutable (Version Table)
-    name: str = Field(min_length=2, description="Marketing Name")
+    sku: str = Field(min_length=2)
+    gtin: Optional[str] = None
+    name: str = Field(min_length=2)
     description: Optional[str] = None
-    product_type: str = Field(description="Category (Apparel, Footwear, etc)")
-    version_name: str = Field(description="e.g. 'Spring 2025 Release'")
-
-    # Media
+    product_type: str
+    version_name: str
     images: List[ProductImageCreate] = Field(default_factory=list)
+
+# --- READ MODELS (Existing preserved) ---
 
 
 class ProductRead(SQLModel):
-    """
-    Response model for Product List/Details.
-    Flattens the data from Product + Latest Version.
-    """
     id: UUID
     tenant_id: UUID
-
-    # From Immutable Shell
     sku: str
     gtin: Optional[str]
-
-    # From Latest Version
-    name: str             # product_name
-    category: str         # category
+    name: str
+    category: str
     latest_version_id: UUID
     status: VersionStatus
-
-    # From Latest Version Media
-    image_url: Optional[str] = None  # The 'is_main' image
+    image_url: Optional[str] = None
 
 
 class ProductVersionSummary(SQLModel):
-    """
-    Used for the 'History' list in the frontend.
-    """
     id: UUID
-    version_name: str       # "Spring 2025"
-    version_number: int     # 1, 2, 3
-    status: VersionStatus   # "draft", "published"
+    version_name: str
+    version_number: int
+    status: VersionStatus
     created_at: datetime
 
 
 class ProductDetailRead(SQLModel):
-    """
-    Full Command Center View.
-    Now includes rich lists (images, materials, etc.) from the active version.
-    """
     id: UUID
     sku: str
     gtin: Optional[str]
-
-    # Active/Latest Version Data
     active_version_id: UUID
     name: str
     category: str
     description: Optional[str]
-    image_url: Optional[str]  # Cover image
-
-    # --- NEW: Rich Data Lists ---
+    image_url: Optional[str]
     images: List[ProductVersionMedia] = []
     materials: List[VersionMaterial] = []
     supply_chain: List[VersionSupplier] = []
     certifications: List[VersionCertification] = []
     impact: Dict[str, Any] = {}
-
-    # Version History
     versions: List[ProductVersionSummary]
 
-    active_request_status: Optional[str] = None
+# --- UPDATE MODELS (New & Enhanced) ---
 
 
 class VersionMetadataUpdate(SQLModel):
-    """Update Name, Category, Description of a specific version"""
+    """Updates Overview Tab text fields + Parent Product GTIN"""
     product_name: Optional[str] = None
     category: Optional[str] = None
     description: Optional[str] = None
     version_name: Optional[str] = None
+    # Allowed to update GTIN on the parent product via this route for convenience
+    gtin: Optional[str] = None
 
 
 class VersionImpactUpdate(SQLModel):
-    """Update Environmental Stats"""
+    """Updates Impact Tab"""
     manufacturing_country: Optional[str] = None
     total_carbon_footprint_kg: Optional[float] = None
     total_water_usage_liters: Optional[float] = None
     total_energy_mj: Optional[float] = None
+    recycling_instructions: Optional[str] = None
+    recyclability_class: Optional[str] = None
+
+# -- Materials --
 
 
 class MaterialAdd(SQLModel):
-    """
-    If material_id is provided, we link to Library.
-    If not, we use 'unlisted_material_name' as free text.
-    """
     material_id: Optional[UUID] = None
-    name: str  # logic: if no ID, this becomes unlisted_name
+    name: str
     percentage: float
     origin_country: str
     transport_method: Optional[str] = "sea"
 
 
+class MaterialUpdate(SQLModel):
+    """New: Allows fixing typos or adjusting % on existing line items"""
+    material_id: Optional[UUID] = None  # Can switch link
+    name: Optional[str] = None
+    percentage: Optional[float] = None
+    origin_country: Optional[str] = None
+    transport_method: Optional[str] = None
+
+# -- Supply Chain --
+
+
 class SupplierAdd(SQLModel):
-    """
-    If supplier_profile_id is provided, link to Address Book.
-    Else, use free text.
-    """
     supplier_profile_id: Optional[UUID] = None
-    name: str  # logic: if no ID, this becomes unlisted_name
-    role: str  # e.g. "tier_2_fabric"
+    name: str
+    role: str
     country: str
+
+
+class SupplierUpdate(SQLModel):
+    """New: Allows editing a node without deleting/re-adding"""
+    supplier_profile_id: Optional[UUID] = None
+    name: Optional[str] = None
+    role: Optional[str] = None
+    country: Optional[str] = None
+
+# -- Certifications --
 
 
 class CertificationAdd(SQLModel):
     certification_id: Optional[UUID] = None
-    name: str
+    name: str  # Fallback or display name
     document_url: Optional[str] = None
     valid_until: Optional[date] = None
+
+
+class CertificationUpdate(SQLModel):
+    """New: Update expiry or document URL"""
+    certification_id: Optional[UUID] = None
+    name: Optional[str] = None
+    document_url: Optional[str] = None
+    valid_until: Optional[date] = None
+
+# -- Media --
+
+
+class ProductImageAdd(SQLModel):
+    """For adding a new image to an existing version"""
+    file_data: str  # Base64
+    is_main: bool = False
