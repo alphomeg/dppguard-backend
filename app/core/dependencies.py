@@ -5,16 +5,19 @@ from sqlmodel import Session
 from pydantic import ValidationError
 
 from app.db.core import get_session
+
 from app.services.user import UserService
 from app.db.schema import User
 
-from app.services.supplier import SupplierService
+from app.services.material_definition import MaterialDefinitionService
 
-from app.services.product import ProductService
+# from app.services.supplier import SupplierService
 
-from app.services.collaboration import CollaborationService
+# from app.services.product import ProductService
 
-from app.services.brand import BrandService
+# from app.services.collaboration import CollaborationService
+
+# from app.services.brand import BrandService
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="signin")
@@ -25,21 +28,26 @@ def get_user_service(session: Session = Depends(get_session)) -> UserService:
     return UserService(session)
 
 
-def get_product_service(session: Session = Depends(get_session)) -> ProductService:
-    return ProductService(session)
+def get_material_definition_service(session: Session = Depends(get_session)) -> MaterialDefinitionService:
+    """Creates a MaterialDefinitionService instance using the active DB session."""
+    return MaterialDefinitionService(session)
 
 
-def get_brand_service(session: Session = Depends(get_session)) -> BrandService:
-    return BrandService(session)
+# def get_product_service(session: Session = Depends(get_session)) -> ProductService:
+#     return ProductService(session)
 
 
-def get_collab_service(session: Session = Depends(get_session)) -> CollaborationService:
-    return CollaborationService(session)
+# def get_brand_service(session: Session = Depends(get_session)) -> BrandService:
+#     return BrandService(session)
 
 
-def get_supplier_service(session: Session = Depends(get_session)) -> SupplierService:
-    """Dependency injection for SupplierService."""
-    return SupplierService(session)
+# def get_collab_service(session: Session = Depends(get_session)) -> CollaborationService:
+#     return CollaborationService(session)
+
+
+# def get_supplier_service(session: Session = Depends(get_session)) -> SupplierService:
+#     """Dependency injection for SupplierService."""
+#     return SupplierService(session)
 
 
 def get_current_user(

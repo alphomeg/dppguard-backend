@@ -2,8 +2,8 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 import uuid
 from sqlmodel import SQLModel, Field, Relationship, JSON
-from sqlalchemy import Column, Index
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, Index, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from enum import Enum
 
 # ENUMS
@@ -133,6 +133,15 @@ class VisibilityScope(str, Enum):
     RESTRICTED_RECYCLE = "recycle"  # Visible only to professional recyclers.
     # Never exposed; for Brand/Supplier analytics only.
     INTERNAL = "internal"
+
+
+class MaterialType(str, Enum):
+    SYNTHETIC = "synthetic"
+    NATURAL = "natural"
+    BLEND = "blend"
+    RECYCLED = "recycled"
+    METAL = "metal"
+    OTHER = "other"
 
 
 class CertificateCategory(str, Enum):
@@ -361,6 +370,26 @@ class SoftDeleteMixin(SQLModel):
 # 2. AUTHORIZATION (RBAC)
 # ==============================================================================
 
+
+class RolePermissionLink(TimestampMixin, SQLModel, table=True):
+    """
+    A many-to-many pivot table connecting Roles to Permissions.
+    This table resolves the relationship that allows a single Role (e.g., 'Admin')
+    to hold multiple Permissions (e.g., 'create_user', 'delete_product'), and
+    a single Permission to belong to multiple Roles.
+    """
+    role_id: uuid.UUID = Field(
+        foreign_key="role.id",
+        primary_key=True,
+        description="The UUID of the role being assigned permissions. Example: '550e8400-e29b-41d4-a716-446655440000'"
+    )
+    permission_id: uuid.UUID = Field(
+        foreign_key="permission.id",
+        primary_key=True,
+        description="The UUID of the specific permission being granted. Example: 'a1b2c3d4-e5f6-7890-1234-567890abcdef'"
+    )
+
+
 class Permission(TimestampMixin, SQLModel, table=True):
     """
     Represents an atomic authorization unit or capability within the system.
@@ -384,7 +413,7 @@ class Permission(TimestampMixin, SQLModel, table=True):
     )
 
     roles: List["Role"] = Relationship(
-        back_populates="permissions", link_model="RolePermissionLink")
+        back_populates="permissions", link_model=RolePermissionLink)
 
 
 class Role(TimestampMixin, SQLModel, table=True):
@@ -415,28 +444,9 @@ class Role(TimestampMixin, SQLModel, table=True):
     )
 
     permissions: List["Permission"] = Relationship(
-        back_populates="roles", link_model="RolePermissionLink")
+        back_populates="roles", link_model=RolePermissionLink)
     memberships: List["TenantMember"] = Relationship(back_populates="role")
     tenant: Optional["Tenant"] = Relationship(back_populates="custom_roles")
-
-
-class RolePermissionLink(TimestampMixin, SQLModel, table=True):
-    """
-    A many-to-many pivot table connecting Roles to Permissions.
-    This table resolves the relationship that allows a single Role (e.g., 'Admin')
-    to hold multiple Permissions (e.g., 'create_user', 'delete_product'), and
-    a single Permission to belong to multiple Roles.
-    """
-    role_id: uuid.UUID = Field(
-        foreign_key="role.id",
-        primary_key=True,
-        description="The UUID of the role being assigned permissions. Example: '550e8400-e29b-41d4-a716-446655440000'"
-    )
-    permission_id: uuid.UUID = Field(
-        foreign_key="permission.id",
-        primary_key=True,
-        description="The UUID of the specific permission being granted. Example: 'a1b2c3d4-e5f6-7890-1234-567890abcdef'"
-    )
 
 
 # ==============================================================================
@@ -477,6 +487,16 @@ class Tenant(TimestampMixin, SQLModel, table=True):
     location_country: str = Field(description="ISO 2-letter country code.")
 
     # Relationships
+    custom_roles: List["Role"] = Relationship(
+        back_populates="tenant")
+    members: List["TenantMember"] = Relationship(
+        back_populates="tenant")
+    invitations: List["TenantInvitation"] = Relationship(
+        back_populates="tenant")
+    supplier_profiles: List["SupplierProfile"] = Relationship(
+        back_populates="tenant",
+        sa_relationship_kwargs={"foreign_keys": "[SupplierProfile.tenant_id]"}
+    )
     supplier_artifacts: List["SupplierArtifact"] = Relationship(
         back_populates="tenant")
     material_definitions: List["MaterialDefinition"] = Relationship(
@@ -484,6 +504,7 @@ class Tenant(TimestampMixin, SQLModel, table=True):
     certificate_types: List["CertificateDefinition"] = Relationship(
         back_populates="tenant")
     products: List["Product"] = Relationship(back_populates="tenant")
+    passports: List["DPP"] = Relationship(back_populates="tenant")
     dpp_templates: List["DPPTemplate"] = Relationship(back_populates="tenant")
 
 
@@ -798,6 +819,10 @@ class MaterialDefinition(TimestampMixin, SQLModel, table=True):
 
     name: str = Field(description="The common name of the material.")
     code: str = Field(description="Internal ERP code or standard ISO code.")
+    description: Optional[str] = Field(
+        default=None, description="Details about composition.")
+    material_type: MaterialType = Field(
+        default=MaterialType.OTHER, description="Category.")
     default_carbon_footprint: Optional[float] = Field(
         description="Baseline CO2e per kg for this material.")
 
@@ -890,8 +915,8 @@ class Product(TimestampMixin, SQLModel, table=True):
     technical_versions: List["ProductVersion"] = Relationship(
         back_populates="product")
 
-    # One-to-Many: A product has many Public DPP pages (historical)
-    dpp_versions: List["DPPVersion"] = Relationship(back_populates="product")
+    # Keep this one! This is the correct link.
+    passport: Optional["DPP"] = Relationship(back_populates="product")
 
 
 class ProductMedia(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
@@ -1064,7 +1089,7 @@ class ProductVersionCertificate(TimestampMixin, SQLModel, table=True):
 
     # 2. The Definition (The Standard)
     certificate_type_id: uuid.UUID = Field(
-        foreign_key="certificatetype.id",
+        foreign_key="certificatedefinition.id",
         description="Link to the standard definition (e.g., GOTS) for categorization."
     )
 
@@ -1373,7 +1398,7 @@ class ProductVersionRecyclingStage(TimestampMixin, SoftDeleteMixin, SQLModel, ta
         description="The unique identifier for this recycling stage."
     )
     recycling_info_id: uuid.UUID = Field(
-        foreign_key="versionrecyclinginfo.id",
+        foreign_key="productversionrecycling.id",
         index=True,
         description="The parent recycling information block this stage belongs to."
     )
@@ -1422,7 +1447,7 @@ class ProductVersionRecyclingStageContent(TimestampMixin, SoftDeleteMixin, SQLMo
         description="Unique ID for this content block."
     )
     stage_id: uuid.UUID = Field(
-        foreign_key="recyclingstage.id",
+        foreign_key="productversionrecyclingstage.id",
         index=True,
         description="The parent Stage this content belongs to."
     )
@@ -1661,6 +1686,8 @@ class DPPTemplate(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
     # Relationships
     tenant: Optional["Tenant"] = Relationship(back_populates="dpp_templates")
     dpp_versions: List["DPPVersion"] = Relationship(back_populates="template")
+    translatable_fields: List["DPPTemplateField"] = Relationship(
+        back_populates="template")
 
     # Self-referential relationship for cloning lineage
     children_templates: List["DPPTemplate"] = Relationship(
@@ -1692,8 +1719,8 @@ class DPPTemplateField(TimestampMixin, SQLModel, table=True):
 
     key: str = Field(
         index=True,
-        description="Technical identifier. MUST be lowercase, dot-notation. "
-                    "VALIDATION REGEX: ^[a-z0-9]+(\.[a-z0-9]+)*$. "
+        description=r"Technical identifier. MUST be lowercase, dot-notation. "
+                    r"VALIDATION REGEX: ^[a-z0-9]+(\.[a-z0-9]+)*$. "
                     "Examples: 'header.title', 'specs.carbon'. "
                     "Inconsistent naming prevents proper nested JSON mapping in the frontend."
     )
@@ -1748,7 +1775,12 @@ class DPP(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
     # This acts as the "Global Default" if no specific RoutingLogic is matched.
     default_dpp_version_id: Optional[uuid.UUID] = Field(
         default=None,
-        foreign_key="dppversion.id",
+        sa_column=Column(
+            PG_UUID(as_uuid=True),
+            ForeignKey("dppversion.id", use_alter=True,
+                       name="fk_dpp_default_version"),
+            nullable=True
+        ),
         description="The fallback version to show if no geo-specific routing rules match the user's context."
     )
 
@@ -1797,7 +1829,7 @@ class DPPAccessRule(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     passport_id: uuid.UUID = Field(
-        foreign_key="digitalproductpassport.id", index=True)
+        foreign_key="dpp.id", index=True)
 
     rule_type: AccessRuleType = Field(
         description="The type of logic to apply. Example: 'geo_block'."
@@ -1842,7 +1874,7 @@ class DPPRoutingLogic(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     passport_id: uuid.UUID = Field(
-        foreign_key="digitalproductpassport.id", index=True)
+        foreign_key="dpp.id", index=True)
 
     target_version_id: uuid.UUID = Field(
         foreign_key="dppversion.id",
@@ -1877,7 +1909,7 @@ class DPPVersion(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
     from a single data source.
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    passport_id: uuid.UUID = Field(foreign_key="digitalproductpassport.id")
+    passport_id: uuid.UUID = Field(foreign_key="dpp.id")
     source_product_version_id: uuid.UUID = Field(
         foreign_key="productversion.id")
     template_id: uuid.UUID = Field(foreign_key="dpptemplate.id")
@@ -1902,7 +1934,12 @@ class DPPVersion(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
     published_at: Optional[datetime] = Field(default=None)
 
     # Relationships
-    passport: DPP = Relationship(back_populates="versions")
+    passport: DPP = Relationship(
+        back_populates="versions",
+        sa_relationship_kwargs={
+            "foreign_keys": "[DPPVersion.passport_id]"
+        }
+    )
     template: DPPTemplate = Relationship(back_populates="dpp_versions")
     source_product_version: "ProductVersion" = Relationship(
         sa_relationship_kwargs={"foreign_keys": "DPPVersion.source_product_version_id"})

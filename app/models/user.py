@@ -1,9 +1,16 @@
+from enum import Enum
 from typing import Optional
 from uuid import UUID
 from sqlmodel import SQLModel, Field
 from pydantic import EmailStr, StringConstraints
 from typing_extensions import Annotated
+
 from app.db.schema import TenantType
+
+
+class RegistrationTenantType(str, Enum):
+    BRAND = TenantType.BRAND.value
+    SUPPLIER = TenantType.SUPPLIER.value
 
 
 class ActiveTenantRead(SQLModel):
@@ -11,7 +18,7 @@ class ActiveTenantRead(SQLModel):
     name: str
     slug: str
     type: TenantType
-    location_country: Optional[str] = None
+    location_country: str
 
 
 class UserRead(SQLModel):
@@ -20,8 +27,6 @@ class UserRead(SQLModel):
     first_name: str
     last_name: str
     is_active: bool
-
-    # This field will hold the details of the CURRENTLY active tenant
     current_tenant: Optional[ActiveTenantRead] = None
 
 
@@ -62,13 +67,13 @@ class UserCreate(SQLModel):
         description="Plain text password."
     )
 
-    # New Fields for Onboarding Flow
-    company_name: str = Field(
+    # Organization Details
+    company_name: str = Field(min_length=2, max_length=100)
+
+    # Schema requires this for Geo-Fencing logic
+    location_country: str = Field(
         min_length=2,
-        max_length=100,
-        description="The legal name of the Brand or Supplier organization."
+        max_length=2,
+        description="ISO 2-letter country code (e.g. US, FR)"
     )
-    location_country: str = Field(min_length=2, max_length=2)
-    account_type: TenantType = Field(
-        description="The type of account to create: 'brand', 'supplier', or 'hybrid'."
-    )
+    account_type: RegistrationTenantType

@@ -5,11 +5,11 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import index
 from app.api.v1 import user
-from app.api.v1 import supplier
-from app.api.v1 import material
-from app.api.v1 import certification
-from app.api.v1 import product
-from app.api.v1 import collaboration
+from app.api.v1 import material_definition
+# from app.api.v1 import supplier
+# from app.api.v1 import certification
+# from app.api.v1 import product
+# from app.api.v1 import collaboration
 
 
 from app.core.config import settings
@@ -35,21 +35,21 @@ app.add_middleware(
 # Register routes
 app.include_router(index.router, prefix="/api/v1")
 app.include_router(user.router, prefix="/api/v1/users")
-app.include_router(supplier.router, prefix="/api/v1/suppliers")
 app.include_router(
-    material.router, prefix="/api/v1/materials", tags=["Materials"])
-app.include_router(certification.router,
-                   prefix="/api/v1/certifications", tags=["Certifications"])
-app.include_router(
-    product.router,
-    prefix="/api/v1/products",
-    tags=["Products"]
-)
-app.include_router(
-    collaboration.router,
-    prefix="/api/v1/collaboration",
-    tags=["Collaboration Workflow"]
-)
+    material_definition.router, prefix="/api/v1/materials", tags=["Materials"])
+# app.include_router(supplier.router, prefix="/api/v1/suppliers")
+# app.include_router(certification.router,
+#                    prefix="/api/v1/certifications", tags=["Certifications"])
+# app.include_router(
+#     product.router,
+#     prefix="/api/v1/products",
+#     tags=["Products"]
+# )
+# app.include_router(
+#     collaboration.router,
+#     prefix="/api/v1/collaboration",
+#     tags=["Collaboration Workflow"]
+# )
 
 
 # Static files serving

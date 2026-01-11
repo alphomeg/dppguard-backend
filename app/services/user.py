@@ -5,16 +5,14 @@ import secrets
 from datetime import datetime, timedelta
 
 import jwt
-from jwt.exceptions import InvalidTokenError
 from loguru import logger
 from sqlmodel import Session, select
 from fastapi import HTTPException, status
-from pydantic import ValidationError
 
 from app.core.config import settings
 from app.db.schema import (
-    User, Tenant, TenantMember, TenantType,
-    TenantStatus, Role, MemberStatus, TenantConnection, ConnectionStatus
+    TenantStatus, MemberStatus, ConnectionStatus,
+    Role, User, Tenant, TenantMember, TenantConnection, SupplierProfile,
 )
 from app.models.auth import Token, TokenData
 from app.models.user import UserCreate
@@ -127,8 +125,19 @@ class UserService:
 
         # 3. Prepare Data
         hashed_pw = get_password_hash(user_in.password)
+        owner_role_name = ""
+
+        if user_in.account_type == "brand":
+            owner_role_name = "Brand Owner"
+        elif user_in.account_type == "supplier":
+            owner_role_name = "Supplier Admin"
+        else:
+            raise ValueError(
+                "System configuration error: Owner role not found for the account type.")
+
         owner_role = self.session.exec(
-            select(Role).where(Role.name == "Owner", Role.tenant_id == None)
+            select(Role).where(Role.name ==
+                               owner_role_name, Role.tenant_id == None)
         ).first()
 
         if not owner_role:
@@ -171,22 +180,36 @@ class UserService:
             )
             self.session.add(membership)
 
-            # D. LINK PENDING INVITATIONS (The Logic You Requested)
-            # Find any connection requests where the invite email matches this new user
+            # D. LINK PENDING B2B INVITATIONS (Updated for Schema)
+            # Scenario: A Brand invited this email to be a supplier.
+            # We must link the Connection AND the SupplierProfile.
+
             pending_invites = self.session.exec(
                 select(TenantConnection)
                 .where(TenantConnection.supplier_email_invite == user_in.email)
                 .where(TenantConnection.status == ConnectionStatus.PENDING)
             ).all()
 
-            for invite in pending_invites:
-                # We link the real tenant ID now.
-                invite.supplier_tenant_id = new_tenant.id
-                # We do NOT set status to CONNECTED yet.
-                # We keep it PENDING so the Supplier can explicitly "Accept" later.
-                self.session.add(invite)
+            for connection in pending_invites:
+                # 1. Link the Connection
+                connection.supplier_tenant_id = new_tenant.id
+                self.session.add(connection)
+
+                # 2. Link the Shadow Profile (SupplierProfile)
+                # Your schema says SupplierProfile.connected_tenant_id is a DENORMALIZED field.
+                # We must update it here to maintain integrity.
+                if connection.supplier_profile_id:
+                    profile = self.session.get(
+                        SupplierProfile, connection.supplier_profile_id)
+                    if profile:
+                        profile.connected_tenant_id = new_tenant.id
+                        # Update metadata while we are at it
+                        if not profile.contact_email:
+                            profile.contact_email = new_user.email
+                        self.session.add(profile)
+
                 logger.info(
-                    f"Linked new Tenant {new_tenant.id} to Pending Invite {invite.id}")
+                    f"Linked new Tenant {new_tenant.id} to Connection {connection.id}")
 
             # --- COMMIT ---
             self.session.commit()
