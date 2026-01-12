@@ -11,6 +11,8 @@ from app.db.schema import User
 
 from app.services.material_definition import MaterialDefinitionService
 
+from app.services.certificate_definition import CertificateDefinitionService
+
 # from app.services.supplier import SupplierService
 
 # from app.services.product import ProductService
@@ -31,6 +33,10 @@ def get_user_service(session: Session = Depends(get_session)) -> UserService:
 def get_material_definition_service(session: Session = Depends(get_session)) -> MaterialDefinitionService:
     """Creates a MaterialDefinitionService instance using the active DB session."""
     return MaterialDefinitionService(session)
+
+
+def get_certificate_definition_service(session: Session = Depends(get_session)) -> CertificateDefinitionService:
+    return CertificateDefinitionService(session)
 
 
 # def get_product_service(session: Session = Depends(get_session)) -> ProductService:

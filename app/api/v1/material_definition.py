@@ -1,8 +1,6 @@
-# app/api/routes/materials.py
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, BackgroundTasks
 from typing import List, Optional
 import uuid
-from sqlmodel import Session
 
 from app.db.schema import User
 from app.core.dependencies import get_current_user, get_material_definition_service
@@ -40,11 +38,12 @@ def list_materials(
 )
 def create_material(
     data: MaterialDefinitionCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     service: MaterialDefinitionService = Depends(
         get_material_definition_service)
 ):
-    return service.create_material(current_user, data)
+    return service.create_material(current_user, data, background_tasks)
 
 
 @router.patch(
@@ -56,11 +55,12 @@ def create_material(
 def update_material(
     material_id: uuid.UUID,
     data: MaterialDefinitionUpdate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     service: MaterialDefinitionService = Depends(
         get_material_definition_service)
 ):
-    return service.update_material(current_user, material_id, data)
+    return service.update_material(current_user, material_id, data, background_tasks)
 
 
 @router.delete(
@@ -70,8 +70,9 @@ def update_material(
 )
 def delete_material(
     material_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     service: MaterialDefinitionService = Depends(
         get_material_definition_service)
 ):
-    return service.delete_material(current_user, material_id)
+    return service.delete_material(current_user, material_id, background_tasks)
