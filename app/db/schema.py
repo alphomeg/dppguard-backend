@@ -742,6 +742,11 @@ class TenantConnection(TimestampMixin, SQLModel, table=True):
         description="Secure token included in the email link to identify this connection request during registration."
     )
 
+    retry_count: int = Field(
+        default=0,
+        description="Tracks how many times the invite has been resent. Limit is usually 3."
+    )
+
     request_note: Optional[str] = Field(
         default=None,
         description="A note from the Brand explaining the invite or re-invite."

@@ -7,7 +7,7 @@ from app.api.v1 import index
 from app.api.v1 import user
 from app.api.v1 import material_definition
 from app.api.v1 import certification_definition
-# from app.api.v1 import supplier
+from app.api.v1 import supplier
 # from app.api.v1 import certification
 # from app.api.v1 import product
 # from app.api.v1 import collaboration
@@ -40,8 +40,8 @@ app.include_router(
     material_definition.router, prefix="/api/v1/materials", tags=["Materials"])
 app.include_router(certification_definition.router,
                    prefix="/api/v1/certifications", tags=["Certifications"])
-
-# app.include_router(supplier.router, prefix="/api/v1/suppliers")
+app.include_router(supplier.router,
+                   prefix="/api/v1/suppliers", tags=["Suppliers"])
 # app.include_router(certification.router,
 #                    prefix="/api/v1/certifications", tags=["Certifications"])
 # app.include_router(

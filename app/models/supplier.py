@@ -3,125 +3,152 @@ from uuid import UUID
 from sqlmodel import SQLModel, Field
 from pydantic import EmailStr, StringConstraints, model_validator
 from typing_extensions import Annotated
-from app.db.schema import ConnectionStatus, TenantType
 from datetime import datetime
+from app.db.schema import ConnectionStatus, TenantType
 
 
 class SupplierProfileCreate(SQLModel):
     """
-    Input: Brand provides Name + (Handle OR Email).
+    Payload for adding a new Supplier to the Brand's Address Book.
+    Requires either a public handle (existing user) or an email (new invite).
     """
-    name: str = Field(min_length=2, max_length=100)
-
-    # NEW FIELD
+    name: str = Field(
+        min_length=2,
+        max_length=100,
+        description="The internal display name you want to assign to this supplier (e.g., 'Fabric Mill A')."
+    )
     description: Optional[str] = Field(
         default=None,
         max_length=500,
-        description="Internal notes, capabilities, or details about this supplier."
+        description="Internal notes about capabilities, contracts, or compliance status."
+    )
+    location_country: str = Field(
+        min_length=2,
+        max_length=2,
+        description="ISO 2-letter country code (e.g., 'FR', 'CN'). Critical for supply chain mapping."
     )
 
-    location_country: str = Field(min_length=2, max_length=2)
-
-    # Identification Options
+    # Identity
     public_handle: Optional[str] = Field(
         default=None,
-        description="Connect to an existing company (e.g., 'pk-textiles')."
+        description="The unique platform slug of an existing supplier (e.g., 'acme-textiles')."
     )
     invite_email: Optional[Annotated[EmailStr, StringConstraints(to_lower=True)]] = Field(
         default=None,
-        description="Invite a new company via email."
+        description="If the supplier is not on the platform, provide their email to send an invitation."
     )
     request_note: Optional[str] = Field(
         default=None,
         max_length=500,
-        description="Personal message to include in the email."
+        description="A personal message included in the initial connection request."
     )
 
     @model_validator(mode='after')
     def validate_identity(self) -> 'SupplierProfileCreate':
         if not self.public_handle and not self.invite_email:
             raise ValueError(
-                "Provide either 'public_handle' or 'invite_email'.")
+                "You must provide either a 'public_handle' (to connect) or 'invite_email' (to invite).")
         return self
 
 
 class SupplierProfileRead(SQLModel):
     """
-    Output: The Profile View.
+    Response model representing a Supplier entry in the Address Book.
     """
-    id: UUID
-    name: str
+    id: UUID = Field(description="Unique ID of the profile.")
+    name: str = Field(description="Display name.")
+    description: Optional[str] = Field(description="Internal notes.")
+    location_country: str = Field(description="ISO country code.")
 
-    # NEW FIELD
-    description: Optional[str]
+    connection_status: str = Field(
+        description="Current state of the B2B handshake (e.g., Pending, Connected)."
+    )
 
-    location_country: str
+    connected_handle: Optional[str] = Field(
+        default=None,
+        description="If connected, the public slug of the real Supplier tenant."
+    )
 
-    # Computed / Joined Fields
-    connection_status: ConnectionStatus
+    audit_invite_email: Optional[str] = Field(
+        default=None,
+        description="The email address used for the invitation (if applicable)."
+    )
 
-    # If Connected -> Show Handle
-    connected_handle: Optional[str] = None
+    retry_count: int = Field(
+        default=0,
+        description="Number of times the invite has been resent."
+    )
 
-    # If Pending/Invite -> Show Email (Audit)
-    audit_invite_email: Optional[str] = None
-
-
-class PublicTenantRead(SQLModel):
-    """Minimal view of a tenant for directory search."""
-    name: str
-    slug: str
-    type: TenantType
-    location_country: str
+    can_reinvite: bool = Field(
+        default=True,
+        description="UI Helper: True if retry_count < 3 and status is not Connected."
+    )
 
 
 class SupplierProfileUpdate(SQLModel):
     """
-    Payload for updating a supplier alias.
-    We restrict this to 'name' and 'description' because changing the country or identity 
-    (handle/email) changes the fundamental entity.
+    Payload for editing the alias or notes of a supplier.
     """
-    name: Optional[str] = Field(default=None, min_length=2, max_length=100)
+    name: Optional[str] = Field(
+        default=None,
+        min_length=2,
+        max_length=100,
+        description="Update the internal display name."
+    )
+    description: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Update internal notes."
+    )
 
-    # NEW FIELD
-    description: Optional[str] = Field(default=None, max_length=500)
+
+class SupplierReinvite(SQLModel):
+    """
+    Payload for re-sending an invitation.
+    """
+    invite_email: Optional[EmailStr] = Field(
+        default=None,
+        description="Optionally correct the email address if the previous one bounced."
+    )
+    note: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="A new personal message to include in the retry email."
+    )
 
 
 class InviteDetails(SQLModel):
     """
-    Data returned to the frontend when a user clicks an invite link.
+    Public info returned to the registration page when validating a token.
     """
     email: str
     brand_name: str
     brand_handle: str
-
-    # --- NEW FIELDS ---
-    # The name the Brand assigned to you (e.g. "Lahore Fabrics")
     supplier_name: str
-    supplier_country: str   # The country the Brand assigned
+    supplier_country: str
 
 
 class ConnectionResponse(SQLModel):
+    """
+    Payload for the Supplier Dashboard showing incoming requests.
+    """
     connection_id: UUID
     brand_name: str
     invited_at: datetime
 
 
 class DecisionPayload(SQLModel):
-    accept: bool
+    """
+    Action payload for accepting/declining a request.
+    """
+    accept: bool = Field(description="True to connect, False to decline.")
 
 
-class SupplierReinvite(SQLModel):
+class PublicTenantRead(SQLModel):
     """
-    Payload for re-sending an invitation.
-    Allows correcting the email or adding a note.
+    Directory search result.
     """
-    invite_email: Optional[EmailStr] = Field(
-        default=None,
-        description="Correct the email address if it was wrong."
-    )
-    note: Optional[str] = Field(
-        default=None,
-        max_length=500,
-        description="Personal message to include in the email."
-    )
+    name: str
+    slug: str
+    type: TenantType
+    location_country: str

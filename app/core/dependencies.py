@@ -13,7 +13,7 @@ from app.services.material_definition import MaterialDefinitionService
 
 from app.services.certificate_definition import CertificateDefinitionService
 
-# from app.services.supplier import SupplierService
+from app.services.supplier import SupplierService
 
 # from app.services.product import ProductService
 
@@ -51,9 +51,9 @@ def get_certificate_definition_service(session: Session = Depends(get_session)) 
 #     return CollaborationService(session)
 
 
-# def get_supplier_service(session: Session = Depends(get_session)) -> SupplierService:
-#     """Dependency injection for SupplierService."""
-#     return SupplierService(session)
+def get_supplier_service(session: Session = Depends(get_session)) -> SupplierService:
+    """Dependency injection for SupplierService."""
+    return SupplierService(session)
 
 
 def get_current_user(

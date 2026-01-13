@@ -22,7 +22,7 @@ class ConnectionRequestItem(SQLModel):
 class ProductTaskItem(SQLModel):
     id: UUID
     product_name: str
-    version_name: str  # Matches the "Brand & Version" column in UI
+    version_name: str
     sku: Optional[str]
     brand_name: str
     status: str
