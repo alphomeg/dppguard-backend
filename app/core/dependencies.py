@@ -15,7 +15,7 @@ from app.services.certificate_definition import CertificateDefinitionService
 
 from app.services.supplier import SupplierService
 
-# from app.services.product import ProductService
+from app.services.product import ProductService
 
 # from app.services.collaboration import CollaborationService
 
@@ -39,8 +39,8 @@ def get_certificate_definition_service(session: Session = Depends(get_session)) 
     return CertificateDefinitionService(session)
 
 
-# def get_product_service(session: Session = Depends(get_session)) -> ProductService:
-#     return ProductService(session)
+def get_product_service(session=Depends(get_session)) -> ProductService:
+    return ProductService(session)
 
 
 # def get_brand_service(session: Session = Depends(get_session)) -> BrandService:

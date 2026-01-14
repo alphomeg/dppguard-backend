@@ -1,133 +1,245 @@
-from typing import List, Optional
-from uuid import UUID
-from sqlmodel import Session, select
-from fastapi import HTTPException
+import uuid
+from typing import List
 from loguru import logger
+from sqlmodel import Session, select
+from sqlalchemy.orm import selectinload
+from fastapi import HTTPException, BackgroundTasks
 
-from app.models.product import (
-    VersionMetadataUpdate, VersionImpactUpdate, ProductVersionSummary,
-    MaterialAdd, SupplierAdd, CertificationAdd, ProductCreate, ProductRead, ProductDetailRead,
-    MaterialUpdate, SupplierUpdate, CertificationUpdate, ProductImageAdd
-)
 from app.db.schema import (
-    User, VersionMaterial, VersionSupplier, VersionCertification, ProductVersionMedia,
-    Product, ProductVersion, VersionStatus, DataContributionRequest
+    User, Tenant, TenantType,
+    Product, ProductMedia, ProductVersion, ProductVersionStatus,
+    AuditAction, DataContributionRequest, CollaborationComment, ConnectionStatus, SupplierProfile, RequestStatus
+)
+from app.models.product import (
+    ProductCreate, ProductIdentityUpdate, ProductRead,
+    ProductMediaAdd, ProductMediaRead, ProductMediaReorder, ProductAssignmentRequest
 )
 from app.utils.file_storage import save_base64_image
+from app.core.audit import _perform_audit_log
 
 
 class ProductService:
     def __init__(self, session: Session):
         self.session = session
 
-    def _get_version_for_edit(self, user: User, version_id: UUID) -> ProductVersion:
-        """Helper: Ensure user owns the product version via Tenant."""
-        tenant_id = getattr(user, "_tenant_id")
-        stmt = (
-            select(ProductVersion)
-            .join(Product)
-            .where(ProductVersion.id == version_id)
-            .where(Product.tenant_id == tenant_id)
-        )
-        version = self.session.exec(stmt).first()
-        if not version:
-            raise HTTPException(404, "Version not found or access denied.")
-        if version.status in [VersionStatus.PUBLISHED, VersionStatus.ARCHIVED]:
-            # Optional: Strict check to prevent editing published passports
-            pass
-        return version
-
-    def create_product(self, user: User, data: ProductCreate) -> ProductRead:
-        tenant_id = getattr(user, "_tenant_id")
-
-        # 1. Check SKU Uniqueness (Tenant Scope)
-        existing = self.session.exec(
-            select(Product).where(Product.tenant_id ==
-                                  tenant_id, Product.sku == data.sku)
-        ).first()
-        if existing:
+    def _get_brand_tenant(self, user: User) -> Tenant:
+        """Enforce Brand Access Only."""
+        tenant_id = getattr(user, "_tenant_id", None)
+        tenant = self.session.get(Tenant, tenant_id)
+        if not tenant or tenant.type != TenantType.BRAND:
             raise HTTPException(
-                409, f"Product with SKU '{data.sku}' already exists.")
+                403, "Only Brands can manage Product Identity.")
+        return tenant
+
+    # ==========================
+    # READ OPERATIONS
+    # ==========================
+
+    def list_products(self, user: User) -> List[ProductRead]:
+        """
+        Lists all products for the Brand.
+        Computed fields:
+        - latest_version_id/name: derived from the sequence.
+        - main_image_url: from the cache field.
+        """
+        brand = self._get_brand_tenant(user)
+
+        # Eager load versions and media to avoid N+1 queries
+        statement = (
+            select(Product)
+            .where(Product.tenant_id == brand.id)
+            .options(selectinload(Product.technical_versions))
+            .options(selectinload(Product.marketing_media))
+            .order_by(Product.created_at.desc())
+        )
+        products = self.session.exec(statement).all()
+
+        results = []
+        for p in products:
+            # Determine Active Version Name
+            v_id = None
+            v_name = p.pending_version_name  # Default to pending
+
+            if p.technical_versions:
+                # If real versions exist, show the latest
+                latest_v = sorted(
+                    p.technical_versions, key=lambda v: v.version_sequence, reverse=True)[0]
+                v_id = latest_v.id
+                v_name = latest_v.version_name
+
+            # Build Read Model
+            results.append(ProductRead(
+                id=p.id,
+                sku=p.sku,
+                name=p.name,
+                description=p.description,
+                ean=p.ean,
+                upc=p.upc,
+                lifecycle_status=p.lifecycle_status,
+                main_image_url=p.main_image_url,
+                latest_version_id=v_id,
+                latest_version_name=v_name,
+                media=[],
+                created_at=p.created_at,
+                updated_at=p.updated_at
+            ))
+        return results
+
+    def get_product(self, user: User, product_id: uuid.UUID) -> ProductRead:
+        """Get single product details with full media gallery."""
+        brand = self._get_brand_tenant(user)
+
+        product = self.session.exec(
+            select(Product)
+            .where(Product.id == product_id, Product.tenant_id == brand.id)
+            .options(selectinload(Product.technical_versions))
+            .options(selectinload(Product.marketing_media))
+        ).first()
+
+        if not product:
+            raise HTTPException(404, "Product not found.")
+
+        # Latest version logic
+        latest_v = None
+        if product.technical_versions:
+            latest_v = sorted(product.technical_versions,
+                              key=lambda v: v.version_sequence, reverse=True)[0]
+
+        # Map Media
+        # Sort media by display_order
+        sorted_media = sorted(product.marketing_media,
+                              key=lambda m: m.display_order)
+        media_dtos = [
+            ProductMediaRead(
+                id=m.id,
+                file_url=m.file_url,
+                file_name=m.file_name,
+                file_type=m.file_type,
+                display_order=m.display_order,
+                is_main=m.is_main,
+                description=m.description
+            ) for m in sorted_media
+        ]
+
+        return ProductRead(
+            id=product.id,
+            sku=product.sku,
+            name=product.name,
+            description=product.description,
+            ean=product.ean,
+            upc=product.upc,
+            lifecycle_status=product.lifecycle_status,
+            main_image_url=product.main_image_url,
+            latest_version_id=latest_v.id if latest_v else None,
+            latest_version_name=latest_v.version_name if latest_v else None,
+            media=media_dtos,
+            created_at=product.created_at,
+            updated_at=product.updated_at
+        )
+
+    def create_product(self, user: User, data: ProductCreate, background_tasks: BackgroundTasks) -> ProductRead:
+        """
+        1. Creates Product Shell.
+        2. Creates Initial Version (Empty, Draft) with Brand-provided name.
+        3. Saves and Links Media.
+        4. Audits ALL entities created.
+        """
+        brand = self._get_brand_tenant(user)
+
+        # 1. Uniqueness Check
+        if self.session.exec(select(Product).where(Product.tenant_id == brand.id, Product.sku == data.sku)).first():
+            raise HTTPException(
+                409, f"Product SKU '{data.sku}' already exists.")
 
         try:
-            # --- A. Create Immutable Product Shell ---
+            # 1. Create Shell (With Pending Name)
             product = Product(
-                tenant_id=tenant_id,
+                tenant_id=brand.id,
                 sku=data.sku,
-                gtin=data.gtin
+                name=data.name,
+                description=data.description,
+                ean=data.ean,
+                upc=data.upc,
+                internal_erp_id=data.internal_erp_id,
+                lifecycle_status=data.lifecycle_status,
+                pending_version_name=data.initial_version_name
             )
             self.session.add(product)
-            self.session.flush()  # Flush to get product.id
+            self.session.flush()  # Get ID
 
-            # --- B. Create First Version (Draft) ---
-            version = ProductVersion(
-                product_id=product.id,
-                created_by_tenant_id=tenant_id,
-
-                # Version Metadata
-                version_number=1,
-                version_name=data.version_name,
-                status=VersionStatus.WORKING_DRAFT,
-
-                # Product Data (Mutable)
-                product_name=data.name,
-                category=data.product_type,
-                description=data.description,
-
-                # Init Environment Data as None/Empty
-                manufacturing_country=None,
-                total_carbon_footprint_kg=None
+            # Audit Product
+            background_tasks.add_task(
+                _perform_audit_log, tenant_id=brand.id, user_id=user.id,
+                entity_type="Product", entity_id=product.id,
+                action=AuditAction.CREATE, changes=data.model_dump(
+                    exclude={"media_files"})
             )
-            self.session.add(version)
-            self.session.flush()  # Flush to get version.id
 
-            # --- C. Handle Images (Save to Disk) ---
-            main_image_url = None
+            # 2. Handle Media
+            main_url = None
+            media_responses = []
 
-            for idx, img in enumerate(data.images):
-                # Ensure only one main image if frontend messed up, or take the first one
-                is_main = img.is_main
+            for idx, media_item in enumerate(data.media_files):
+                # 1. Save File
+                file_url = save_base64_image(media_item.file_data)
 
-                # 1. PROCESS IMAGE: Save Base64 to Disk and get URL
-                try:
-                    saved_file_url = save_base64_image(img.file_data)
-                except Exception as e:
-                    logger.error(f"Failed to save image {idx}: {e}")
-                    continue  # Skip bad images but don't fail entire request
-
-                # 2. SAVE DB RECORD
-                media_entry = ProductVersionMedia(
-                    version_id=version.id,
-                    file_url=saved_file_url,  # Store the path, not the base64
-                    is_main=is_main,
+                # 2. DB Record
+                media_entry = ProductMedia(
+                    product_id=product.id,
+                    file_url=file_url,
+                    file_name=media_item.file_name,
+                    file_type=media_item.file_type,
+                    description=media_item.description,
+                    is_main=media_item.is_main,
                     display_order=idx
                 )
                 self.session.add(media_entry)
+                self.session.flush()
 
-                if is_main:
-                    main_image_url = saved_file_url
+                if media_item.is_main:
+                    main_url = file_url
+
+                # Audit Media Creation
+                background_tasks.add_task(
+                    _perform_audit_log, tenant_id=brand.id, user_id=user.id,
+                    entity_type="ProductMedia", entity_id=media_entry.id,
+                    action=AuditAction.CREATE, changes={
+                        "file_name": media_item.file_name}
+                )
+
+                # Prepare response object
+                media_responses.append(ProductMediaRead(
+                    id=media_entry.id,
+                    file_url=file_url,
+                    file_name=media_entry.file_name,
+                    file_type=media_entry.file_type,
+                    display_order=media_entry.display_order,
+                    is_main=media_entry.is_main,
+                    description=media_entry.description
+                ))
+
+            # Update cache field
+            if main_url:
+                product.main_image_url = main_url
+                self.session.add(product)
 
             self.session.commit()
             self.session.refresh(product)
 
-            # Map to Read Model
-            # Fallback to first image URL if main was not explicitly set but images exist
-            final_image_url = main_image_url
-            if not final_image_url and data.images:
-                # Re-query or infer from the logic above (simplification for response)
-                # In a real scenario, we might query ProductVersionMedia back
-                pass
-
             return ProductRead(
                 id=product.id,
-                tenant_id=product.tenant_id,
                 sku=product.sku,
-                gtin=product.gtin,
-                name=version.product_name,
-                category=version.category,
-                latest_version_id=version.id,
-                status=version.status,
-                image_url=main_image_url  # This will now be http://.../static/products/xyz.png
+                name=product.name,
+                description=product.description,
+                ean=product.ean,
+                upc=product.upc,
+                lifecycle_status=product.lifecycle_status,
+                main_image_url=product.main_image_url,
+                latest_version_id=None,
+                latest_version_name=product.pending_version_name,
+                media=media_responses,
+                created_at=product.created_at,
+                updated_at=product.updated_at
             )
 
         except Exception as e:
@@ -135,346 +247,339 @@ class ProductService:
             logger.error(f"Create Product Failed: {e}")
             raise HTTPException(500, "Failed to create product.")
 
-    def list_products(self, user: User) -> List[ProductRead]:
-        """
-        List all products. 
-        Fetches the 'Latest Version' to populate the mutable fields (Name, Image).
-        """
-        tenant_id = getattr(user, "_tenant_id")
+    # ==========================
+    # IDENTITY MANAGEMENT
+    # ==========================
 
-        # 1. Fetch Products for this Tenant
-        statement = select(Product).where(Product.tenant_id == tenant_id)
-        products = self.session.exec(statement).all()
+    def update_product_identity(self, user: User, product_id: uuid.UUID, data: ProductIdentityUpdate, background_tasks: BackgroundTasks):
+        brand = self._get_brand_tenant(user)
+        product = self.session.get(Product, product_id)
 
-        results = []
-        for product in products:
-            # 2. Find Latest Version
-            # In production, use a JOIN or Window Function.
-            # For now, Python sorting is acceptable for smaller datasets.
-            if not product.versions:
-                continue
+        if not product or product.tenant_id != brand.id:
+            raise HTTPException(404, "Product not found.")
 
-            latest_version = sorted(
-                product.versions, key=lambda v: v.version_number, reverse=True)[0]
+        old_state = product.model_dump()
 
-            # 3. Find Main Image
-            main_img = next(
-                (m for m in latest_version.media if m.is_main), None)
-            # Fallback to first image if no main set
-            if not main_img and latest_version.media:
-                main_img = latest_version.media[0]
+        if data.name:
+            product.name = data.name
+        if data.description:
+            product.description = data.description
+        if data.ean:
+            product.ean = data.ean
+        if data.upc:
+            product.upc = data.upc
+        if data.lifecycle_status:
+            product.lifecycle_status = data.lifecycle_status
 
-            results.append(ProductRead(
-                id=product.id,
-                tenant_id=product.tenant_id,
-                sku=product.sku,
-                gtin=product.gtin,
+        self.session.add(product)
+        self.session.commit()
 
-                # Mapped from Version
-                name=latest_version.product_name,
-                category=latest_version.category,
-                latest_version_id=latest_version.id,
-                status=latest_version.status,
-
-                # Mapped from Media
-                image_url=main_img.file_url if main_img else None
-            ))
-
-        return results
-
-    def get_product_details(self, user: User, product_id: UUID, version_id: Optional[UUID] = None) -> ProductDetailRead:
-        """
-        Updated to support ?version_id=... selection
-        """
-        tenant_id = getattr(user, "_tenant_id")
-
-        # 1. Fetch Product
-        product = self.session.exec(
-            select(Product).where(Product.id == product_id,
-                                  Product.tenant_id == tenant_id)
-        ).first()
-
-        if not product:
-            raise HTTPException(404, "Product not found")
-
-        # 2. Determine Target Version
-        target_version = None
-
-        # Sort history for the dropdown list
-        history_list = sorted(
-            product.versions, key=lambda v: v.version_number, reverse=True
+        # Audit
+        background_tasks.add_task(
+            _perform_audit_log, tenant_id=brand.id, user_id=user.id,
+            entity_type="Product", entity_id=product.id,
+            action=AuditAction.UPDATE,
+            changes={"old": old_state,
+                     "new": data.model_dump(exclude_unset=True)}
         )
+        return product
 
-        if version_id:
-            # Specific version requested (Switching versions)
-            target_version = next(
-                (v for v in history_list if v.id == version_id), None)
-            if not target_version:
-                raise HTTPException(404, "Requested version not found.")
-        else:
-            # Default to latest
-            if not history_list:
-                raise HTTPException(500, "Product has no versions.")
-            target_version = history_list[0]
+    # ==========================
+    # MEDIA MANAGEMENT (Granular)
+    # ==========================
 
-        # 3. Get Main Image
-        media_list = target_version.media
-        main_img = next((m for m in media_list if m.is_main), None)
-        if not main_img and media_list:
-            main_img = media_list[0]
+    def add_media(self, user: User, product_id: uuid.UUID, data: ProductMediaAdd, background_tasks: BackgroundTasks):
+        brand = self._get_brand_tenant(user)
+        product = self.session.get(Product, product_id)
+        if not product or product.tenant_id != brand.id:
+            raise HTTPException(404, "Product not found.")
 
-        # 4. Build Response
-        return ProductDetailRead(
-            id=product.id,
-            sku=product.sku,
-            gtin=product.gtin,
+        # If setting as main, unset others first
+        if data.is_main:
+            self._unset_main_media(product.id)
 
-            active_version_id=target_version.id,
-            name=target_version.product_name,
-            category=target_version.category,
-            description=target_version.description,
-            image_url=main_img.file_url if main_img else None,
-
-            # Relationships for THIS specific version
-            images=media_list,
-            materials=target_version.materials,
-            supply_chain=target_version.suppliers,
-            certifications=target_version.certifications,
-            impact={
-                "carbon": target_version.total_carbon_footprint_kg,
-                "water": target_version.total_water_usage_liters,
-                "energy": target_version.total_energy_mj,
-                "country": target_version.manufacturing_country
-            },
-
-            versions=[
-                ProductVersionSummary(
-                    id=v.id,
-                    version_name=v.version_name,
-                    version_number=v.version_number,
-                    status=v.status,
-                    created_at=v.created_at
-                ) for v in history_list
-            ]
-        )
-
-    # --- 1. OVERVIEW & METADATA ---
-
-    def update_version_metadata(self, user: User, version_id: UUID, data: VersionMetadataUpdate):
-        version = self._get_version_for_edit(user, version_id)
-
-        # Update Mutable Version Data
-        if data.product_name is not None:
-            version.product_name = data.product_name
-        if data.category is not None:
-            version.category = data.category
-        if data.description is not None:
-            version.description = data.description
-        if data.version_name is not None:
-            version.version_name = data.version_name
-
-        # Update Parent Product Data (GTIN) if provided
-        if data.gtin is not None:
-            product = self.session.get(Product, version.product_id)
-            if product:
-                product.gtin = data.gtin
-                self.session.add(product)
-
-        self.session.add(version)
-        self.session.commit()
-        return {"message": "Product overview updated"}
-
-    # --- 2. IMPACT ---
-
-    def update_version_impact(self, user: User, version_id: UUID, data: VersionImpactUpdate):
-        version = self._get_version_for_edit(user, version_id)
-        for key, val in data.model_dump(exclude_unset=True).items():
-            setattr(version, key, val)
-        self.session.add(version)
-        self.session.commit()
-        return {"message": "Impact data updated"}
-
-    # --- 3. MATERIALS (Add, Update, Delete) ---
-
-    def add_material(self, user: User, version_id: UUID, data: MaterialAdd):
-        version = self._get_version_for_edit(user, version_id)
-        is_unlisted = data.material_id is None
-        item = VersionMaterial(
-            version_id=version.id,
-            material_id=data.material_id,
-            unlisted_material_name=data.name if is_unlisted else None,
-            percentage=data.percentage,
-            origin_country=data.origin_country,
-            transport_method=data.transport_method
-        )
-        self.session.add(item)
-        self.session.commit()
-        self.session.refresh(item)
-        return item
-
-    def update_material(self, user: User, version_id: UUID, item_id: UUID, data: MaterialUpdate):
-        """Update a specific material line item."""
-        self._get_version_for_edit(user, version_id)  # Auth check
-        item = self.session.get(VersionMaterial, item_id)
-        if not item or item.version_id != version_id:
-            raise HTTPException(404, "Material item not found.")
-
-        if data.material_id is not None:
-            item.material_id = data.material_id
-        if data.name is not None:
-            item.unlisted_material_name = data.name
-        if data.percentage is not None:
-            item.percentage = data.percentage
-        if data.origin_country is not None:
-            item.origin_country = data.origin_country
-        if data.transport_method is not None:
-            item.transport_method = data.transport_method
-
-        self.session.add(item)
-        self.session.commit()
-        self.session.refresh(item)
-        return item
-
-    def remove_material(self, user: User, version_id: UUID, item_id: UUID):
-        self._get_version_for_edit(user, version_id)  # Auth check
-        item = self.session.get(VersionMaterial, item_id)
-        if item and item.version_id == version_id:
-            self.session.delete(item)
-            self.session.commit()
-
-    # --- 4. SUPPLY CHAIN (Add, Update, Delete) ---
-
-    def add_supplier(self, user: User, version_id: UUID, data: SupplierAdd):
-        version = self._get_version_for_edit(user, version_id)
-        is_unlisted = data.supplier_profile_id is None
-        item = VersionSupplier(
-            version_id=version.id,
-            supplier_profile_id=data.supplier_profile_id,
-            unlisted_supplier_name=data.name if is_unlisted else None,
-            unlisted_supplier_country=data.country if is_unlisted else None,
-            role=data.role
-        )
-        self.session.add(item)
-        self.session.commit()
-        self.session.refresh(item)
-        return item
-
-    def update_supplier(self, user: User, version_id: UUID, item_id: UUID, data: SupplierUpdate):
-        self._get_version_for_edit(user, version_id)
-        item = self.session.get(VersionSupplier, item_id)
-        if not item or item.version_id != version_id:
-            raise HTTPException(404, "Supplier node not found.")
-
-        if data.supplier_profile_id is not None:
-            item.supplier_profile_id = data.supplier_profile_id
-        if data.name is not None:
-            item.unlisted_supplier_name = data.name
-        if data.country is not None:
-            item.unlisted_supplier_country = data.country
-        if data.role is not None:
-            item.role = data.role
-
-        self.session.add(item)
-        self.session.commit()
-        self.session.refresh(item)
-        return item
-
-    def remove_supplier(self, user: User, version_id: UUID, item_id: UUID):
-        self._get_version_for_edit(user, version_id)
-        item = self.session.get(VersionSupplier, item_id)
-        if item and item.version_id == version_id:
-            self.session.delete(item)
-            self.session.commit()
-
-    # --- 5. CERTIFICATIONS (Add, Update, Delete) ---
-
-    def add_certification(self, user: User, version_id: UUID, data: CertificationAdd):
-        version = self._get_version_for_edit(user, version_id)
-        item = VersionCertification(
-            version_id=version.id,
-            certification_id=data.certification_id,
-            document_url=data.document_url,
-            valid_until=data.valid_until
-        )
-        self.session.add(item)
-        self.session.commit()
-        return item
-
-    def update_certification(self, user: User, version_id: UUID, item_id: UUID, data: CertificationUpdate):
-        self._get_version_for_edit(user, version_id)
-        item = self.session.get(VersionCertification, item_id)
-        if not item or item.version_id != version_id:
-            raise HTTPException(404, "Certification not found.")
-
-        if data.certification_id is not None:
-            item.certification_id = data.certification_id
-        if data.document_url is not None:
-            item.document_url = data.document_url
-        if data.valid_until is not None:
-            item.valid_until = data.valid_until
-
-        self.session.add(item)
-        self.session.commit()
-        return item
-
-    def remove_certification(self, user: User, version_id: UUID, item_id: UUID):
-        self._get_version_for_edit(user, version_id)
-        item = self.session.get(VersionCertification, item_id)
-        if item and item.version_id == version_id:
-            self.session.delete(item)
-            self.session.commit()
-
-    # --- 6. MEDIA (Add, Delete, Set Main) ---
-
-    def add_image(self, user: User, version_id: UUID, data: ProductImageAdd):
-        version = self._get_version_for_edit(user, version_id)
-
-        # 1. Save Base64 to disk
+        # Save Base64
         file_url = save_base64_image(data.file_data)
 
-        # 2. Check if we need to unset existing main
-        if data.is_main:
-            existing_main = self.session.exec(select(ProductVersionMedia).where(
-                ProductVersionMedia.version_id == version_id, ProductVersionMedia.is_main == True)).first()
-            if existing_main:
-                existing_main.is_main = False
-                self.session.add(existing_main)
+        # Determine order (append to end)
+        current_max = self.session.exec(select(ProductMedia).where(
+            ProductMedia.product_id == product.id)).all()
+        next_order = len(current_max)
 
-        # 3. Add new
-        media = ProductVersionMedia(
-            version_id=version_id,
+        media = ProductMedia(
+            product_id=product.id,
             file_url=file_url,
+            file_name=data.file_name,
+            file_type=data.file_type,
+            description=data.description,
             is_main=data.is_main,
-            display_order=99  # Append to end
+            display_order=next_order
         )
+
         self.session.add(media)
+
+        if data.is_main:
+            product.main_image_url = file_url
+            self.session.add(product)
+
         self.session.commit()
+        self.session.refresh(media)
+
+        # Audit
+        background_tasks.add_task(
+            _perform_audit_log, tenant_id=brand.id, user_id=user.id,
+            entity_type="ProductMedia", entity_id=media.id,
+            action=AuditAction.CREATE, changes={"file_name": data.file_name}
+        )
         return media
 
-    def delete_image(self, user: User, version_id: UUID, media_id: UUID):
-        self._get_version_for_edit(user, version_id)
-        media = self.session.get(ProductVersionMedia, media_id)
-        if media and media.version_id == version_id:
-            self.session.delete(media)
-            self.session.commit()
-        else:
-            raise HTTPException(404, "Image not found")
+    def delete_media(self, user: User, media_id: uuid.UUID, background_tasks: BackgroundTasks):
+        brand = self._get_brand_tenant(user)
+        media = self.session.get(ProductMedia, media_id)
 
-    def set_main_image(self, user: User, version_id: UUID, media_id: UUID):
-        self._get_version_for_edit(user, version_id)
+        if not media:
+            raise HTTPException(404, "Media not found.")
 
-        # Unset current main
-        current_main = self.session.exec(select(ProductVersionMedia).where(
-            ProductVersionMedia.version_id == version_id, ProductVersionMedia.is_main == True)).all()
-        for img in current_main:
+        # Verify ownership via Product linkage
+        product = self.session.get(Product, media.product_id)
+        if product.tenant_id != brand.id:
+            raise HTTPException(403, "Access denied.")
+
+        was_main = media.is_main
+        file_name = media.file_name
+
+        self.session.delete(media)
+
+        # If deleted main, update product cache to None (or could pick next available)
+        if was_main:
+            product.main_image_url = None
+            self.session.add(product)
+
+        self.session.commit()
+
+        # Audit
+        background_tasks.add_task(
+            _perform_audit_log, tenant_id=brand.id, user_id=user.id,
+            entity_type="ProductMedia", entity_id=media_id,
+            action=AuditAction.DELETE, changes={"file_name": file_name}
+        )
+        return {"message": "Media deleted"}
+
+    def set_main_media(self, user: User, product_id: uuid.UUID, media_id: uuid.UUID, background_tasks: BackgroundTasks):
+        """Sets a specific image as Main, updates Product cache."""
+        brand = self._get_brand_tenant(user)
+        media = self.session.get(ProductMedia, media_id)
+
+        if not media:
+            raise HTTPException(404, "Media not found.")
+        if media.product_id != product_id:
+            raise HTTPException(400, "Media does not belong to this product.")
+
+        # Unset all
+        self._unset_main_media(product_id)
+
+        # Set new
+        media.is_main = True
+        self.session.add(media)
+
+        # Update Product Cache
+        product = self.session.get(Product, product_id)
+        product.main_image_url = media.file_url
+        self.session.add(product)
+
+        self.session.commit()
+
+        # Audit
+        background_tasks.add_task(
+            _perform_audit_log, tenant_id=brand.id, user_id=user.id,
+            entity_type="Product", entity_id=product_id,
+            action=AuditAction.UPDATE, changes={
+                "action": "set_main_image", "media_id": str(media_id)}
+        )
+        return {"message": "Main image updated"}
+
+    def reorder_media(self, user: User, product_id: uuid.UUID, order_list: List[ProductMediaReorder], background_tasks: BackgroundTasks):
+        """Bulk update display_order."""
+        brand = self._get_brand_tenant(user)
+
+        # Verify Product Ownership
+        product = self.session.get(Product, product_id)
+        if not product or product.tenant_id != brand.id:
+            raise HTTPException(403, "Access denied.")
+
+        for item in order_list:
+            media = self.session.get(ProductMedia, item.media_id)
+            if media and media.product_id == product_id:
+                media.display_order = item.new_order
+                self.session.add(media)
+
+        self.session.commit()
+
+        # Audit
+        background_tasks.add_task(
+            _perform_audit_log, tenant_id=brand.id, user_id=user.id,
+            entity_type="Product", entity_id=product_id,
+            action=AuditAction.UPDATE, changes={
+                "action": "reorder_media", "count": len(order_list)}
+        )
+        return {"message": "Media reordered"}
+
+    def _unset_main_media(self, product_id: uuid.UUID):
+        """Helper to set is_main=False for all media of a product."""
+        existing = self.session.exec(
+            select(ProductMedia)
+            .where(ProductMedia.product_id == product_id)
+            .where(ProductMedia.is_main == True)
+        ).all()
+        for img in existing:
             img.is_main = False
             self.session.add(img)
 
-        # Set new main
-        new_main = self.session.get(ProductVersionMedia, media_id)
-        if new_main and new_main.version_id == version_id:
-            new_main.is_main = True
-            self.session.add(new_main)
-            self.session.commit()
+    def assign_product(
+        self,
+        user: User,
+        product_id: uuid.UUID,
+        data: ProductAssignmentRequest,
+        background_tasks: BackgroundTasks
+    ):
+        """
+        Assigns a Product to a Supplier.
+
+        Logic:
+        1. Validates Brand owns Product.
+        2. Validates Supplier Profile belongs to Brand and is Connected.
+        3. VERSION LOGIC:
+           - If no versions exist: Creates v1 (Draft) using 'pending_version_name'.
+           - If latest is Locked (Submitted/Approved): Clones it to new v(N+1) Draft.
+           - If latest is Draft: Re-assigns ownership to new Supplier.
+        4. Creates 'DataContributionRequest'.
+        """
+        brand = self._get_brand_tenant(user)
+
+        # 1. Fetch Product
+        product = self.session.get(Product, product_id)
+        if not product or product.tenant_id != brand.id:
+            raise HTTPException(404, "Product not found.")
+
+        # 2. Fetch Supplier Profile & Verify Connection
+        profile = self.session.get(SupplierProfile, data.supplier_profile_id)
+        if not profile or profile.tenant_id != brand.id:
+            raise HTTPException(404, "Supplier profile not found.")
+
+        # Check the B2B Handshake
+        # We access the relationship 'connection' on SupplierProfile (1:1)
+        connection = profile.connection
+
+        if not connection:
+            raise HTTPException(
+                400, "This supplier is not connected on the platform.")
+
+        if connection.status != ConnectionStatus.ACTIVE:
+            raise HTTPException(
+                400, "Cannot assign: Connection is not active.")
+
+        if not connection.supplier_tenant_id:
+            raise HTTPException(
+                400, "Cannot assign: Supplier has not completed onboarding (No Tenant ID).")
+
+        real_supplier_id = connection.supplier_tenant_id
+
+        # 3. Handle Version Strategy
+        existing_versions = self.session.exec(
+            select(ProductVersion)
+            .where(ProductVersion.product_id == product.id)
+            .order_by(ProductVersion.version_sequence.desc())
+        ).all()
+
+        target_version = None
+
+        if not existing_versions:
+            # SCENARIO A: First Assignment (Initialize v1)
+            # Use the name the brand set during shell creation, or fallback
+            v_name = product.pending_version_name or "Initial Version"
+
+            target_version = ProductVersion(
+                product_id=product.id,
+                supplier_tenant_id=real_supplier_id,
+                version_sequence=1,
+                version_name=v_name,
+                status=ProductVersionStatus.DRAFT
+            )
+            self.session.add(target_version)
+
+            # Clear the pending name from shell as it is now realized
+            product.pending_version_name = None
+            self.session.add(product)
+            self.session.flush()
+
         else:
-            raise HTTPException(404, "Image not found")
+            latest = existing_versions[0]
+
+            if latest.status in [ProductVersionStatus.APPROVED, ProductVersionStatus.SUBMITTED]:
+                # SCENARIO B: Previous version locked -> Clone new Draft
+                # (Assuming _clone_version_structure helper exists in this class or util)
+                target_version = self._clone_version_helper(latest)
+                target_version.supplier_tenant_id = real_supplier_id
+                target_version.version_sequence = latest.version_sequence + 1
+                target_version.status = ProductVersionStatus.DRAFT
+                self.session.add(target_version)
+                self.session.flush()
+            else:
+                # SCENARIO C: Re-assigning an existing Draft
+                latest.supplier_tenant_id = real_supplier_id
+                target_version = latest
+                self.session.add(target_version)
+
+        # 4. Create Workflow Request
+        request = DataContributionRequest(
+            connection_id=connection.id,
+            brand_tenant_id=brand.id,
+            supplier_tenant_id=real_supplier_id,
+            initial_version_id=target_version.id,
+            current_version_id=target_version.id,
+            due_date=data.due_date,
+            request_note=data.request_note,
+            status=RequestStatus.SENT
+        )
+        self.session.add(request)
+
+        # Add Note as Comment History
+        if data.request_note:
+            comment = CollaborationComment(
+                request_id=request.id,
+                author_user_id=user.id,
+                body=data.request_note
+            )
+            self.session.add(comment)
+
+        self.session.commit()
+        self.session.refresh(request)
+
+        # 5. Audit
+        background_tasks.add_task(
+            _perform_audit_log,
+            tenant_id=brand.id,
+            user_id=user.id,
+            entity_type="DataContributionRequest",
+            entity_id=request.id,
+            action=AuditAction.CREATE,
+            changes={
+                "product_id": str(product.id),
+                "supplier_profile_id": str(profile.id),
+                "version_sequence": target_version.version_sequence
+            }
+        )
+
+        return {"message": "Assignment sent successfully", "request_id": request.id}
+
+    def _clone_version_helper(self, source: ProductVersion) -> ProductVersion:
+        """Helper to copy structure without ID/Relationships."""
+        return ProductVersion(
+            product_id=source.product_id,
+            version_name=source.version_name,  # Usually overwritten by caller
+            manufacturing_country=source.manufacturing_country,
+            mass_kg=source.mass_kg,
+            total_carbon_footprint=source.total_carbon_footprint,
+            # Note: Deep copy of materials/certs usually handled by explicit loop
+            # in the main logic if needed, or initialized empty for new draft
+        )

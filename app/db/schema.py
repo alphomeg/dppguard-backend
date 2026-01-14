@@ -901,6 +901,9 @@ class Product(TimestampMixin, SQLModel, table=True):
 
     name: str = Field(description="The marketing name of the product.")
 
+    description: Optional[str] = Field(
+        description="The description of the product.")
+
     lifecycle_status: ProductLifecycleStatus = Field(
         default=ProductLifecycleStatus.ACTIVE,
         index=True,
@@ -910,6 +913,12 @@ class Product(TimestampMixin, SQLModel, table=True):
     main_image_url: Optional[str] = Field(
         default=None,
         description="DENORMALIZED: The cached URL of the 'is_main=True' media asset. Enables high-performance rendering of Product Grids without performing SQL Joins on the ProductMedia table."
+    )
+
+    pending_version_name: Optional[str] = Field(
+        default=None,
+        description="Stores the version name (e.g. 'Spring Launch') provided by Brand at creation. "
+                    "Used to name the first ProductVersion when a Supplier is finally assigned."
     )
 
     tenant: Tenant = Relationship(back_populates="products")
@@ -1040,8 +1049,8 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
     )
 
     # Core Environmental Data
-    manufacturing_country: str = Field(
-        description="Where final assembly happened.")
+    manufacturing_country: Optional[str] = Field(
+        default=None, description="Where final assembly happened.")
 
     mass_kg: float = Field(
         default=0.0,

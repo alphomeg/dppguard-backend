@@ -1,145 +1,130 @@
-from datetime import datetime, date
-from typing import Optional, List, Dict, Any
+from typing import Optional
+from datetime import date
 from uuid import UUID
+from typing import List, Optional
+from datetime import datetime
 from sqlmodel import SQLModel, Field
-from app.db.schema import VersionStatus, ProductVersionMedia, VersionMaterial, VersionSupplier, VersionCertification
+from app.db.schema import ProductLifecycleStatus, MediaType
 
-# --- CREATE / UPLOAD MODELS ---
+# ==========================
+# MEDIA MODELS
+# ==========================
 
 
-class ProductImageCreate(SQLModel):
-    file_data: str = Field(description="Base64 encoded string or URL")
-    is_main: bool = Field(default=False)
-    display_order: int = Field(default=0)
+class ProductMediaBase(SQLModel):
+    is_main: bool = Field(
+        default=False, description="If True, this becomes the cover image.")
+    description: Optional[str] = Field(
+        default=None, description="Alt text for accessibility.")
+
+
+class ProductMediaAdd(ProductMediaBase):
+    """Input: Brand sends Base64, not a URL."""
+    file_data: str = Field(
+        description="Base64 encoded string of the image/video.")
+    file_name: str = Field(description="Original filename for reference.")
+    file_type: MediaType = Field(
+        default=MediaType.IMAGE, description="image or video")
+
+
+class ProductMediaReorder(SQLModel):
+    """Input: Batch reordering."""
+    media_id: UUID
+    new_order: int
+
+
+class ProductMediaRead(ProductMediaBase):
+    """Output: Returns the hosted URL."""
+    id: UUID
+    file_url: str
+    file_name: str
+    file_type: MediaType
+    display_order: int
+
+# ==========================
+# PRODUCT MODELS
+# ==========================
 
 
 class ProductCreate(SQLModel):
-    sku: str = Field(min_length=2)
-    gtin: Optional[str] = None
-    name: str = Field(min_length=2)
-    description: Optional[str] = None
-    product_type: str
-    version_name: str
-    images: List[ProductImageCreate] = Field(default_factory=list)
+    """
+    The Master Payload to initialize a Product.
+    Includes the specific name for the first version (e.g. 'Spring Collection Launch').
+    """
+    sku: str = Field(min_length=3, description="Unique Stock Keeping Unit.")
+    name: str = Field(description="Marketing name of the product.")
+    description: Optional[str] = Field(
+        default=None, description="The description of the product.")
 
-# --- READ MODELS (Existing preserved) ---
+    # Optional Identifiers
+    ean: Optional[str] = Field(
+        default=None, description="European Article Number.")
+    upc: Optional[str] = Field(
+        default=None, description="Universal Product Code.")
+    internal_erp_id: Optional[str] = Field(
+        default=None, description="Internal system ID.")
+
+    lifecycle_status: ProductLifecycleStatus = Field(
+        default=ProductLifecycleStatus.PRE_RELEASE,
+        description="Initial lifecycle status."
+    )
+
+    # Initial Version Info (Brand controls name, not technical data)
+    initial_version_name: str = Field(
+        description="Name for the v1 release. Example: 'SS25 Launch Batch'"
+    )
+
+    # Initial Media (Optional)
+    media_files: List[ProductMediaAdd] = Field(default_factory=list)
+
+
+class ProductIdentityUpdate(SQLModel):
+    """
+    Brand can update Identity, but NOT Version Data.
+    Brand CANNOT update Version Name here (that is immutable after creation).
+    """
+    name: Optional[str] = None
+    description: Optional[str] = None
+    ean: Optional[str] = None
+    upc: Optional[str] = None
+    lifecycle_status: Optional[ProductLifecycleStatus] = None
 
 
 class ProductRead(SQLModel):
-    id: UUID
-    tenant_id: UUID
-    sku: str
-    gtin: Optional[str]
-    name: str
-    category: str
-    latest_version_id: UUID
-    status: VersionStatus
-    image_url: Optional[str] = None
-
-
-class ProductVersionSummary(SQLModel):
-    id: UUID
-    version_name: str
-    version_number: int
-    status: VersionStatus
-    created_at: datetime
-
-
-class ProductDetailRead(SQLModel):
+    """High-level view returned to Brand."""
     id: UUID
     sku: str
-    gtin: Optional[str]
-    active_version_id: UUID
     name: str
-    category: str
     description: Optional[str]
-    image_url: Optional[str]
-    images: List[ProductVersionMedia] = []
-    materials: List[VersionMaterial] = []
-    supply_chain: List[VersionSupplier] = []
-    certifications: List[VersionCertification] = []
-    impact: Dict[str, Any] = {}
-    versions: List[ProductVersionSummary]
+    ean: Optional[str]
+    upc: Optional[str]
+    lifecycle_status: ProductLifecycleStatus
+    main_image_url: Optional[str]
 
-# --- UPDATE MODELS (New & Enhanced) ---
+    # Latest/Active Version Info
+    latest_version_id: Optional[UUID]
+    latest_version_name: Optional[str]
 
-
-class VersionMetadataUpdate(SQLModel):
-    """Updates Overview Tab text fields + Parent Product GTIN"""
-    product_name: Optional[str] = None
-    category: Optional[str] = None
-    description: Optional[str] = None
-    version_name: Optional[str] = None
-    # Allowed to update GTIN on the parent product via this route for convenience
-    gtin: Optional[str] = None
+    media: List[ProductMediaRead] = []
+    created_at: datetime
+    updated_at: datetime
 
 
-class VersionImpactUpdate(SQLModel):
-    """Updates Impact Tab"""
-    manufacturing_country: Optional[str] = None
-    total_carbon_footprint_kg: Optional[float] = None
-    total_water_usage_liters: Optional[float] = None
-    total_energy_mj: Optional[float] = None
-    recycling_instructions: Optional[str] = None
-    recyclability_class: Optional[str] = None
+class ProductAssignmentRequest(SQLModel):
+    """
+    Payload used by the Brand to assign a product to a specific supplier.
+    This triggers the creation of a Request and potentially a new ProductVersion.
+    """
+    supplier_profile_id: UUID = Field(
+        description="The UUID of the SupplierProfile (from the Brand's address book) to whom this request is sent."
+    )
 
-# -- Materials --
+    due_date: Optional[date] = Field(
+        default=None,
+        description="The deadline for the supplier to submit the data."
+    )
 
-
-class MaterialAdd(SQLModel):
-    material_id: Optional[UUID] = None
-    name: str
-    percentage: float
-    origin_country: str
-    transport_method: Optional[str] = "sea"
-
-
-class MaterialUpdate(SQLModel):
-    """New: Allows fixing typos or adjusting % on existing line items"""
-    material_id: Optional[UUID] = None  # Can switch link
-    name: Optional[str] = None
-    percentage: Optional[float] = None
-    origin_country: Optional[str] = None
-    transport_method: Optional[str] = None
-
-# -- Supply Chain --
-
-
-class SupplierAdd(SQLModel):
-    supplier_profile_id: Optional[UUID] = None
-    name: str
-    role: str
-    country: str
-
-
-class SupplierUpdate(SQLModel):
-    """New: Allows editing a node without deleting/re-adding"""
-    supplier_profile_id: Optional[UUID] = None
-    name: Optional[str] = None
-    role: Optional[str] = None
-    country: Optional[str] = None
-
-# -- Certifications --
-
-
-class CertificationAdd(SQLModel):
-    certification_id: Optional[UUID] = None
-    name: str  # Fallback or display name
-    document_url: Optional[str] = None
-    valid_until: Optional[date] = None
-
-
-class CertificationUpdate(SQLModel):
-    """New: Update expiry or document URL"""
-    certification_id: Optional[UUID] = None
-    name: Optional[str] = None
-    document_url: Optional[str] = None
-    valid_until: Optional[date] = None
-
-# -- Media --
-
-
-class ProductImageAdd(SQLModel):
-    """For adding a new image to an existing version"""
-    file_data: str  # Base64
-    is_main: bool = False
+    request_note: Optional[str] = Field(
+        default=None,
+        description="Optional instructions or context for the supplier (e.g., 'Please focus on the carbon footprint')."
+    )
