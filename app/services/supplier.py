@@ -8,7 +8,7 @@ from fastapi import HTTPException, BackgroundTasks
 from app.core.config import settings
 from app.core.audit import _perform_audit_log
 from app.db.schema import (
-    User, Tenant, TenantType, DataContributionRequest,
+    User, Tenant, TenantType, ProductContributionRequest,
     SupplierProfile, TenantConnection, ConnectionStatus, RequestStatus,
     Product, ProductVersion, AuditAction
 )
@@ -568,9 +568,9 @@ class SupplierService:
         # 2. Task Stats (Data Requests)
         # Active = Sent, In Progress, Changes Requested
         active_tasks = self.session.exec(
-            select(func.count(DataContributionRequest.id))
-            .where(DataContributionRequest.supplier_tenant_id == tenant.id)
-            .where(DataContributionRequest.status.in_([
+            select(func.count(ProductContributionRequest.id))
+            .where(ProductContributionRequest.supplier_tenant_id == tenant.id)
+            .where(ProductContributionRequest.status.in_([
                 RequestStatus.SENT,
                 RequestStatus.IN_PROGRESS,
                 RequestStatus.CHANGES_REQUESTED
@@ -578,9 +578,9 @@ class SupplierService:
         ).one()
 
         completed_tasks = self.session.exec(
-            select(func.count(DataContributionRequest.id))
-            .where(DataContributionRequest.supplier_tenant_id == tenant.id)
-            .where(DataContributionRequest.status == RequestStatus.COMPLETED)
+            select(func.count(ProductContributionRequest.id))
+            .where(ProductContributionRequest.supplier_tenant_id == tenant.id)
+            .where(ProductContributionRequest.status == RequestStatus.COMPLETED)
         ).one()
 
         return DashboardStats(

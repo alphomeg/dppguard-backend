@@ -1,8 +1,8 @@
-"""initial commit
+"""Initial
 
-Revision ID: 32659ce6b0f6
+Revision ID: 893fddaabd53
 Revises: 
-Create Date: 2026-01-11 21:14:08.176836
+Create Date: 2026-01-15 22:51:36.233574
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '32659ce6b0f6'
+revision: str = '893fddaabd53'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -118,8 +118,10 @@ def upgrade() -> None:
     sa.Column('upc', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('internal_erp_id', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('lifecycle_status', sa.Enum('ACTIVE', 'DISCONTINUED', 'END_OF_SUPPORT', 'PRE_RELEASE', name='productlifecyclestatus'), nullable=False),
     sa.Column('main_image_url', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('pending_version_name', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -261,7 +263,7 @@ def upgrade() -> None:
     sa.Column('version_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('change_summary', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('status', sa.Enum('DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED', name='productversionstatus'), nullable=False),
-    sa.Column('manufacturing_country', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('manufacturing_country', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('mass_kg', sa.Float(), nullable=False),
     sa.Column('total_carbon_footprint', sa.Float(), nullable=False),
     sa.ForeignKeyConstraint(['product_id'], ['product.id'], ),
@@ -287,6 +289,7 @@ def upgrade() -> None:
     sa.Column('supplier_profile_id', sa.Uuid(), nullable=False),
     sa.Column('supplier_email_invite', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('invitation_token', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('retry_count', sa.Integer(), nullable=False),
     sa.Column('request_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('status', sa.Enum('PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED', name='connectionstatus'), nullable=False),
     sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
@@ -332,25 +335,6 @@ def upgrade() -> None:
     )
     op.create_index(op.f('ix_tenantmember_tenant_id'), 'tenantmember', ['tenant_id'], unique=False)
     op.create_index(op.f('ix_tenantmember_user_id'), 'tenantmember', ['user_id'], unique=False)
-    op.create_table('datacontributionrequest',
-    sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('connection_id', sa.Uuid(), nullable=False),
-    sa.Column('brand_tenant_id', sa.Uuid(), nullable=False),
-    sa.Column('supplier_tenant_id', sa.Uuid(), nullable=False),
-    sa.Column('initial_version_id', sa.Uuid(), nullable=False),
-    sa.Column('current_version_id', sa.Uuid(), nullable=False),
-    sa.Column('due_date', sa.Date(), nullable=True),
-    sa.Column('request_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('status', sa.Enum('SENT', 'ACCEPTED', 'DECLINED', 'IN_PROGRESS', 'SUBMITTED', 'CHANGES_REQUESTED', 'COMPLETED', name='requeststatus'), nullable=False),
-    sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
-    sa.ForeignKeyConstraint(['connection_id'], ['tenantconnection.id'], ),
-    sa.ForeignKeyConstraint(['current_version_id'], ['productversion.id'], ),
-    sa.ForeignKeyConstraint(['initial_version_id'], ['productversion.id'], ),
-    sa.ForeignKeyConstraint(['supplier_tenant_id'], ['tenant.id'], ),
-    sa.PrimaryKeyConstraint('id')
-    )
     op.create_table('dppaccessrule',
     sa.Column('is_deleted', sa.Boolean(), nullable=False),
     sa.Column('deleted_at', sa.DateTime(), nullable=True),
@@ -393,6 +377,25 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_dppversion_is_deleted'), 'dppversion', ['is_deleted'], unique=False)
+    op.create_table('productcontributionrequest',
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('connection_id', sa.Uuid(), nullable=False),
+    sa.Column('brand_tenant_id', sa.Uuid(), nullable=False),
+    sa.Column('supplier_tenant_id', sa.Uuid(), nullable=False),
+    sa.Column('initial_version_id', sa.Uuid(), nullable=False),
+    sa.Column('current_version_id', sa.Uuid(), nullable=False),
+    sa.Column('due_date', sa.Date(), nullable=True),
+    sa.Column('request_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('status', sa.Enum('SENT', 'ACCEPTED', 'DECLINED', 'IN_PROGRESS', 'SUBMITTED', 'CHANGES_REQUESTED', 'COMPLETED', name='requeststatus'), nullable=False),
+    sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
+    sa.ForeignKeyConstraint(['connection_id'], ['tenantconnection.id'], ),
+    sa.ForeignKeyConstraint(['current_version_id'], ['productversion.id'], ),
+    sa.ForeignKeyConstraint(['initial_version_id'], ['productversion.id'], ),
+    sa.ForeignKeyConstraint(['supplier_tenant_id'], ['tenant.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     op.create_table('productversionartifact',
     sa.Column('is_deleted', sa.Boolean(), nullable=False),
     sa.Column('deleted_at', sa.DateTime(), nullable=True),
@@ -498,7 +501,7 @@ def upgrade() -> None:
     sa.Column('body', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('is_rejection_reason', sa.Boolean(), nullable=False),
     sa.ForeignKeyConstraint(['author_user_id'], ['user.id'], ),
-    sa.ForeignKeyConstraint(['request_id'], ['datacontributionrequest.id'], ),
+    sa.ForeignKeyConstraint(['request_id'], ['productcontributionrequest.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_collaborationcomment_request_id'), 'collaborationcomment', ['request_id'], unique=False)
@@ -612,12 +615,12 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_productversionartifact_is_deleted'), table_name='productversionartifact')
     op.drop_index(op.f('ix_productversionartifact_file_hash_sha256'), table_name='productversionartifact')
     op.drop_table('productversionartifact')
+    op.drop_table('productcontributionrequest')
     op.drop_index(op.f('ix_dppversion_is_deleted'), table_name='dppversion')
     op.drop_table('dppversion')
     op.drop_index(op.f('ix_dppaccessrule_passport_id'), table_name='dppaccessrule')
     op.drop_index(op.f('ix_dppaccessrule_is_deleted'), table_name='dppaccessrule')
     op.drop_table('dppaccessrule')
-    op.drop_table('datacontributionrequest')
     op.drop_index(op.f('ix_tenantmember_user_id'), table_name='tenantmember')
     op.drop_index(op.f('ix_tenantmember_tenant_id'), table_name='tenantmember')
     op.drop_table('tenantmember')

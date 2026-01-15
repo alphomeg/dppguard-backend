@@ -9,7 +9,7 @@ from app.api.v1 import material_definition
 from app.api.v1 import certification_definition
 from app.api.v1 import supplier
 from app.api.v1 import product
-# from app.api.v1 import collaboration
+from app.api.v1 import product_contribution
 
 
 from app.core.config import settings
@@ -46,6 +46,12 @@ app.include_router(
     prefix="/api/v1/products",
     tags=["Products"]
 )
+app.include_router(
+    product_contribution.router,
+    prefix="/api/v1/product-contributions",
+    tags=["Product Contributions"]
+)
+
 # app.include_router(
 #     collaboration.router,
 #     prefix="/api/v1/collaboration",

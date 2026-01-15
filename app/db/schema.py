@@ -76,7 +76,7 @@ class ConnectionStatus(str, Enum):
 
 class RequestStatus(str, Enum):
     """
-    The state of a 'DataContributionRequest' (Work Order) sent from Brand to Supplier.
+    The state of a 'ProductContributionRequest' (Work Order) sent from Brand to Supplier.
     """
     SENT = "sent"                        # Email dispatched, waiting for Supplier to open.
     ACCEPTED = "accepted"                # Supplier acknowledged the request.
@@ -1513,7 +1513,7 @@ class ProductVersionRecyclingStageContent(TimestampMixin, SoftDeleteMixin, SQLMo
 # 9. COLLABORATION & WORKFLOW
 # ==============================================================================
 
-class DataContributionRequest(TimestampMixin, SQLModel, table=True):
+class ProductContributionRequest(TimestampMixin, SQLModel, table=True):
     """
     Represents a Work Order or Task sent from a Brand to a Supplier.
     The Brand creates a request asking the Supplier to fill out the 
@@ -1581,7 +1581,7 @@ class CollaborationComment(TimestampMixin, SQLModel, table=True):
         description="Unique ID for the comment."
     )
     request_id: uuid.UUID = Field(
-        foreign_key="datacontributionrequest.id",
+        foreign_key="productcontributionrequest.id",
         index=True,
         description="The request thread this comment belongs to."
     )
@@ -1599,7 +1599,8 @@ class CollaborationComment(TimestampMixin, SQLModel, table=True):
         description="Flag indicating if this comment serves as the official reason for returning a request to the supplier. Example: True"
     )
 
-    request: DataContributionRequest = Relationship(back_populates="comments")
+    request: ProductContributionRequest = Relationship(
+        back_populates="comments")
 
 
 # ==============================================================================

@@ -8,7 +8,7 @@ from fastapi import HTTPException, BackgroundTasks
 from app.db.schema import (
     User, Tenant, TenantType,
     Product, ProductMedia, ProductVersion, ProductVersionStatus,
-    AuditAction, DataContributionRequest, CollaborationComment, ConnectionStatus, SupplierProfile, RequestStatus
+    AuditAction, ProductContributionRequest, CollaborationComment, ConnectionStatus, SupplierProfile, RequestStatus
 )
 from app.models.product import (
     ProductCreate, ProductIdentityUpdate, ProductRead,
@@ -452,7 +452,7 @@ class ProductService:
            - If no versions exist: Creates v1 (Draft) using 'pending_version_name'.
            - If latest is Locked (Submitted/Approved): Clones it to new v(N+1) Draft.
            - If latest is Draft: Re-assigns ownership to new Supplier.
-        4. Creates 'DataContributionRequest'.
+        4. Creates 'ProductContributionRequest'.
         """
         brand = self._get_brand_tenant(user)
 
@@ -531,7 +531,7 @@ class ProductService:
                 self.session.add(target_version)
 
         # 4. Create Workflow Request
-        request = DataContributionRequest(
+        request = ProductContributionRequest(
             connection_id=connection.id,
             brand_tenant_id=brand.id,
             supplier_tenant_id=real_supplier_id,
@@ -560,7 +560,7 @@ class ProductService:
             _perform_audit_log,
             tenant_id=brand.id,
             user_id=user.id,
-            entity_type="DataContributionRequest",
+            entity_type="ProductContributionRequest",
             entity_id=request.id,
             action=AuditAction.CREATE,
             changes={
