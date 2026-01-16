@@ -1,22 +1,26 @@
 import uuid
-from typing import List, Optional
+import mimetypes
+from typing import List
 from loguru import logger
 from sqlmodel import Session, select
-from fastapi import HTTPException, BackgroundTasks
+from fastapi import HTTPException, BackgroundTasks, UploadFile
 from sqlalchemy.orm import selectinload
+
 
 from app.db.schema import (
     User, Tenant, TenantType,
     ProductContributionRequest,
     ProductVersion, ProductVersionStatus,
     CollaborationComment, AuditAction, RequestStatus, Product,
-    ProductVersionMaterial, ProductVersionSupplyNode
+    ProductVersionMaterial, ProductVersionSupplyNode, ProductVersionCertificate,
+    SupplierArtifact, ArtifactType
 )
 from app.models.product_contribution import (
     RequestReadList, RequestReadDetail, RequestAction,
     TechnicalDataUpdate, ActivityLogItem, MaterialInput, SubSupplierInput, CertificateInput
 )
 from app.core.audit import _perform_audit_log
+from app.utils.file_storage import save_upload_file
 
 
 class ProductContributionService:
@@ -130,9 +134,8 @@ class ProductContributionService:
         draft_data = TechnicalDataUpdate(
             manufacturing_country=version.manufacturing_country,
             total_carbon_footprint=version.total_carbon_footprint,
-            # Note: You need to add water/energy columns to ProductVersion table in Schema if they don't exist
-            # For now assuming they exist or we skip them
-            # total_water_usage=version.total_water_usage,
+            total_energy_mj=version.total_energy_mj,
+            total_water_usage=version.total_water_usage,
 
             materials=[
                 MaterialInput(
@@ -153,6 +156,12 @@ class ProductContributionService:
 
             certificates=[
                 CertificateInput(
+                    # Return the Certificate ID (ProductVersionCertificate ID)
+                    id=str(c.id),
+
+                    # FIX: Populate the missing field
+                    certificate_type_id=c.certificate_type_id,
+
                     name=c.snapshot_name,
                     expiry_date=c.valid_until,
                     file_url=c.file_url
@@ -256,6 +265,7 @@ class ProductContributionService:
         user: User,
         request_id: uuid.UUID,
         data: TechnicalDataUpdate,
+        files: List[UploadFile],
         background_tasks: BackgroundTasks
     ):
         supplier = self._get_supplier_tenant(user)
@@ -264,55 +274,131 @@ class ProductContributionService:
         if not req or req.supplier_tenant_id != supplier.id:
             raise HTTPException(404, "Request not found.")
 
-        if req.status not in [RequestStatus.IN_PROGRESS, RequestStatus.CHANGES_REQUESTED]:
-            # Allow saving if status is SENT but user accepted it implicitly?
-            # Usually user must accept first.
-            pass
-
         version = self.session.get(ProductVersion, req.current_version_id)
 
-        # 1. Update Scalar Fields
+        # 1. Update Scalars
         if data.manufacturing_country is not None:
             version.manufacturing_country = data.manufacturing_country
         if data.total_carbon_footprint is not None:
             version.total_carbon_footprint = data.total_carbon_footprint
+        if data.total_energy_mj is not None:
+            version.total_energy_mj = data.total_energy_mj
+        if data.total_water_usage is not None:
+            version.total_water_usage = data.total_water_usage
 
-        # 2. Update Collections (Full Replace Strategy for Drafts is easiest)
-
-        # Materials
-        # Delete existing
-        for m in version.materials:
+        # 2. Update Materials (Full Replace)
+        # FIX: Iterate over a copy, delete, then CLEAR the list on the parent
+        for m in list(version.materials):
             self.session.delete(m)
-        # Add new
+
+        version.materials = []  # <--- Critical Line
+
         for m_in in data.materials:
-            new_m = ProductVersionMaterial(
+            self.session.add(ProductVersionMaterial(
                 version_id=version.id,
                 material_name=m_in.name,
                 percentage=m_in.percentage,
                 origin_country=m_in.origin_country,
                 # transport=m_in.transport_method
-            )
-            self.session.add(new_m)
+            ))
 
-        # Sub Suppliers
-        for s in version.supply_chain:
+        # 3. Update Supply Chain (Full Replace)
+        for s in list(version.supply_chain):
             self.session.delete(s)
+        version.supply_chain = []  # <--- Critical Line
+
         for s_in in data.sub_suppliers:
-            new_s = ProductVersionSupplyNode(
+            self.session.add(ProductVersionSupplyNode(
                 version_id=version.id,
                 role=s_in.role,
                 company_name=s_in.name,
                 location_country=s_in.country
-            )
-            self.session.add(new_s)
+            ))
 
-        # Certificates
-        # (Usually handled via specific upload endpoints, but if metadata passed here, update it)
+        # 4. Handle Certificates
+        # Map temp_ids to files
+        file_map = {f.filename: f for f in files}
+
+        # Clear existing links
+        for old_cert in list(version.certificates):
+            self.session.delete(old_cert)
+
+        version.certificates = []
+
+        for cert_input in data.certificates:
+            final_file_url = cert_input.file_url
+            artifact_id = None
+
+            # Default to generic, will be overwritten
+            detected_content_type = "application/octet-stream"
+
+            # A. HANDLE NEW FILE UPLOAD
+            if cert_input.temp_file_id and cert_input.temp_file_id in file_map:
+                uploaded_file = file_map[cert_input.temp_file_id]
+
+                # 1. Detect Mime Type
+                # Primary: What the browser said
+                if uploaded_file.content_type and uploaded_file.content_type != "application/octet-stream":
+                    detected_content_type = uploaded_file.content_type
+                else:
+                    # Fallback: Guess from extension
+                    mime, _ = mimetypes.guess_type(uploaded_file.filename)
+                    if mime:
+                        detected_content_type = mime
+
+                # 2. Save File
+                saved_url = save_upload_file(uploaded_file)
+
+                # 3. Create Artifact
+                artifact = SupplierArtifact(
+                    tenant_id=supplier.id,
+                    file_name=uploaded_file.filename,
+                    display_name=cert_input.name,
+                    file_url=saved_url,
+                    file_type=ArtifactType.CERTIFICATE
+                )
+                self.session.add(artifact)
+                self.session.flush()
+
+                final_file_url = saved_url
+                artifact_id = artifact.id
+
+            # B. HANDLE EXISTING FILE (NO NEW UPLOAD)
+            elif final_file_url:
+                # Try to preserve existing type or guess from URL extension
+                # (If we had the original ProductVersionCertificate object here we could copy it,
+                # but for simplicity in this Draft-Replace logic, guessing is safe)
+                mime, _ = mimetypes.guess_type(final_file_url)
+                if mime:
+                    detected_content_type = mime
+                elif final_file_url.endswith(".pdf"):
+                    detected_content_type = "application/pdf"
+                elif final_file_url.endswith((".jpg", ".jpeg")):
+                    detected_content_type = "image/jpeg"
+                elif final_file_url.endswith(".png"):
+                    detected_content_type = "image/png"
+
+            # C. CREATE LINK
+            if final_file_url:
+                new_link = ProductVersionCertificate(
+                    version_id=version.id,
+                    certificate_type_id=cert_input.certificate_type_id,
+                    source_artifact_id=artifact_id,
+                    snapshot_name=cert_input.name,
+                    snapshot_issuer="Unknown",
+                    valid_until=cert_input.expiry_date,
+                    file_url=final_file_url,
+                    file_name=cert_input.name,
+
+                    # FIX IS HERE: Use the dynamic variable, do not hardcode
+                    file_type=detected_content_type
+                )
+                self.session.add(new_link)
 
         self.session.add(version)
         self.session.commit()
 
-        return {"message": "Draft saved"}
+        return {"message": "Draft saved with files."}
 
     def add_comment(self, user: User, request_id: uuid.UUID, body: str):
         """Simple chat function."""

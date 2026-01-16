@@ -1060,6 +1060,12 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
     total_carbon_footprint: float = Field(
         default=0.0, description="Aggregated CO2e.")
 
+    total_energy_mj: float = Field(
+        default=0.0, description="Total energy consumption in MJ.")
+
+    total_water_usage: float = Field(
+        default=0.0, description="Total water usage in liters.")
+
     product: Product = Relationship(back_populates="technical_versions")
 
     # Children (The Detailed Snapshots)

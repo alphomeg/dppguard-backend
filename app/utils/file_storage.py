@@ -1,12 +1,18 @@
 import base64
 import os
+import shutil
 import uuid
 from pathlib import Path
+from fastapi import UploadFile
 from app.core.config import settings
+
 
 # Define storage location (using Path for OS agnostic handling)
 PRODUCT_IMG_DIR = Path(settings.static_dir) / "products"
 STATIC_URL_PREFIX = "/static/products"
+
+ARTIFACT_DIR = Path(settings.static_dir) / "artifacts"
+ARTIFACT_URL_PREFIX = "/static/artifacts"
 
 
 def save_base64_image(base64_str: str) -> str:
@@ -49,4 +55,35 @@ def save_base64_image(base64_str: str) -> str:
     except Exception as e:
         # Log this error in production
         print(f"Error saving image: {e}")
+        raise e
+
+
+def save_upload_file(upload_file: UploadFile) -> str:
+    """
+    Saves a binary UploadFile stream to the local static/artifacts directory
+    and returns the public URL.
+    """
+    # 1. Ensure directory exists
+    os.makedirs(ARTIFACT_DIR, exist_ok=True)
+
+    # 2. Generate unique filename
+    # Preserve extension if possible, else default to .bin
+    original_filename = upload_file.filename or "unknown"
+    ext = original_filename.split(
+        ".")[-1] if "." in original_filename else "bin"
+
+    unique_name = f"{uuid.uuid4()}.{ext}"
+    file_path = ARTIFACT_DIR / unique_name
+
+    try:
+        # 3. Write binary stream
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(upload_file.file, buffer)
+
+        # 4. Return Web-Accessible URL
+        # e.g. http://localhost:8000/static/artifacts/uuid.pdf
+        return f"{settings.public_url}{ARTIFACT_URL_PREFIX}/{unique_name}"
+
+    except Exception as e:
+        print(f"Error saving artifact: {e}")
         raise e

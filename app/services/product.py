@@ -580,6 +580,6 @@ class ProductService:
             manufacturing_country=source.manufacturing_country,
             mass_kg=source.mass_kg,
             total_carbon_footprint=source.total_carbon_footprint,
-            # Note: Deep copy of materials/certs usually handled by explicit loop
-            # in the main logic if needed, or initialized empty for new draft
+            total_energy_mj=source.total_energy_mj,
+            total_water_usage=source.total_water_usage,
         )

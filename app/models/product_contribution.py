@@ -23,12 +23,14 @@ class SubSupplierInput(SQLModel):
 
 
 class CertificateInput(SQLModel):
-    """Metadata for uploaded files (Files themselves handled separately or via separate endpoint)"""
-    id: Optional[str] = None  # Frontend might send temporary ID
-    name: str
+    id: Optional[str] = None
+    # NEW: This is now required to link to the definition
+    certificate_type_id: UUID
+    name: str  # This acts as the "display name" or snapshot name
     expiry_date: Optional[date] = None
-    file_url: str  # Backend needs the URL after upload
-    file_size_mb: Optional[str] = None
+    file_url: Optional[str] = None
+    temp_file_id: Optional[str] = None
+
 
 # ==========================
 # MAIN DTOs
