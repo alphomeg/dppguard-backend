@@ -12,7 +12,11 @@ from app.models.product import (
     ProductMediaAdd,
     ProductMediaRead,
     ProductMediaReorder,
-    ProductAssignmentRequest
+    ProductAssignmentRequest,
+    ProductVersionDetailRead,
+    ProductCollaborationStatusRead,
+    CancelRequestPayload,
+    ReviewPayload
 )
 
 router = APIRouter()
@@ -160,3 +164,55 @@ def assign_product_to_supplier(
     - Sends a DataContributionRequest to the Supplier.
     """
     return service.assign_product(current_user, product_id, data, background_tasks)
+
+
+@router.get("/{product_id}/technical-data", response_model=ProductVersionDetailRead)
+def get_product_technical_data(
+    product_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Get the full technical breakdown (Materials, Supply Chain, Impact, Certs)
+    of the *Latest Active Version*.
+    """
+    return service.get_latest_version_detail(current_user, product_id)
+
+
+@router.get("/{product_id}/collaboration-status", response_model=ProductCollaborationStatusRead)
+def get_product_collaboration_status(
+    product_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Get the workflow status.
+    Reveals if the supplier has accepted the request, if data is submitted,
+    or if the version is locked/approved.
+    """
+    return service.get_collaboration_status(current_user, product_id)
+
+
+@router.post("/{product_id}/requests/{request_id}/cancel", status_code=status.HTTP_200_OK)
+def cancel_product_request(
+    product_id: UUID,
+    request_id: UUID,
+    payload: CancelRequestPayload,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    return service.cancel_request(current_user, product_id, request_id, payload.reason)
+
+
+@router.post("/{product_id}/requests/{request_id}/review", status_code=status.HTTP_200_OK)
+def review_product_request(
+    product_id: UUID,
+    request_id: UUID,
+    payload: ReviewPayload,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    """
+    Brand approves or requests changes on a submission.
+    """
+    return service.review_submission(current_user, product_id, request_id, payload.action, payload.comment)

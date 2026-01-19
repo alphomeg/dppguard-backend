@@ -89,6 +89,7 @@ class RequestStatus(str, Enum):
     # Brand reviewed and found errors; returned to Supplier.
     CHANGES_REQUESTED = "changes_req"
     COMPLETED = "completed"              # Brand finally approved the data.
+    CANCELLED = "cancelled"  # Brand cancelled the request.
 
 
 # ==============================================================================
@@ -1282,6 +1283,11 @@ class ProductVersionMaterial(TimestampMixin, SQLModel, table=True):
     percentage: float = Field(description="Composition percentage.")
     origin_country: str = Field(
         description="Where the raw material came from.")
+
+    transport_method: Optional[str] = Field(
+        default=None,
+        description="Mode of transport (e.g. sea, air, road)."
+    )
 
     # Visibility
     visibility: VisibilityScope = Field(

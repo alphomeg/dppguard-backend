@@ -4,7 +4,7 @@ from uuid import UUID
 from typing import List, Optional
 from datetime import datetime
 from sqlmodel import SQLModel, Field
-from app.db.schema import ProductLifecycleStatus, MediaType
+from app.db.schema import ProductLifecycleStatus, MediaType, ProductVersionStatus, RequestStatus
 
 # ==========================
 # MEDIA MODELS
@@ -128,3 +128,93 @@ class ProductAssignmentRequest(SQLModel):
         default=None,
         description="Optional instructions or context for the supplier (e.g., 'Please focus on the carbon footprint')."
     )
+
+# ==========================
+# TECHNICAL DATA READ MODELS
+# ==========================
+
+
+class ProductMaterialRead(SQLModel):
+    id: UUID
+    material_name: str
+    percentage: float
+    origin_country: str
+    transport_method: Optional[str]
+
+
+class ProductSupplyNodeRead(SQLModel):
+    id: UUID
+    role: str
+    company_name: str
+    location_country: str
+
+
+class ProductCertificateRead(SQLModel):
+    id: UUID
+    certificate_type_id: Optional[UUID]
+    snapshot_name: str
+    snapshot_issuer: str
+    valid_until: Optional[date]
+    file_url: str
+    file_type: str
+
+
+class ProductVersionDetailRead(SQLModel):
+    """
+    The full technical snapshot of a specific version.
+    """
+    id: UUID
+    version_sequence: int
+    version_name: str
+    status: ProductVersionStatus
+    created_at: datetime
+    updated_at: datetime
+
+    # Impact Data
+    manufacturing_country: Optional[str]
+    mass_kg: float
+    total_carbon_footprint: float
+    total_energy_mj: Optional[float]
+    total_water_usage: Optional[float]
+
+    # Nested Lists
+    materials: List[ProductMaterialRead] = []
+    supply_chain: List[ProductSupplyNodeRead] = []
+    certificates: List[ProductCertificateRead] = []
+
+# ==========================
+# COLLABORATION STATUS
+# ==========================
+
+
+class ProductCollaborationStatusRead(SQLModel):
+    """
+    Summarizes the workflow state between Brand and Supplier.
+    """
+    active_request_id: Optional[UUID]
+
+    product_id: UUID
+    latest_version_id: Optional[UUID]
+
+    # Workflow State
+    # e.g. SENT, IN_PROGRESS, SUBMITTED
+    request_status: Optional[RequestStatus] = None
+    version_status: ProductVersionStatus         # e.g. DRAFT, APPROVED
+
+    # Supplier Info
+    assigned_supplier_name: Optional[str] = None
+    assigned_supplier_profile_id: Optional[UUID] = None
+
+    supplier_country: Optional[str] = None
+
+    due_date: Optional[date] = None
+    last_updated_at: datetime
+
+
+class CancelRequestPayload(SQLModel):
+    reason: str
+
+
+class ReviewPayload(SQLModel):
+    action: str  # 'approve' or 'request_changes'
+    comment: Optional[str] = None

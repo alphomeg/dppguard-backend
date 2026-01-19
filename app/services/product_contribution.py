@@ -142,7 +142,7 @@ class ProductContributionService:
                     name=m.material_name,
                     percentage=m.percentage,
                     origin_country=m.origin_country,
-                    # transport_method=m.transport_method # Add to schema if missing
+                    transport_method=m.transport_method
                 ) for m in version.materials
             ],
 
@@ -299,7 +299,7 @@ class ProductContributionService:
                 material_name=m_in.name,
                 percentage=m_in.percentage,
                 origin_country=m_in.origin_country,
-                # transport=m_in.transport_method
+                transport_method=m_in.transport_method
             ))
 
         # 3. Update Supply Chain (Full Replace)

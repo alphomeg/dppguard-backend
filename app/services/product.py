@@ -8,11 +8,16 @@ from fastapi import HTTPException, BackgroundTasks
 from app.db.schema import (
     User, Tenant, TenantType,
     Product, ProductMedia, ProductVersion, ProductVersionStatus,
-    AuditAction, ProductContributionRequest, CollaborationComment, ConnectionStatus, SupplierProfile, RequestStatus
+    AuditAction, ProductContributionRequest, CollaborationComment, ConnectionStatus, SupplierProfile, RequestStatus,
+    ProductVersionMaterial, ProductVersionSupplyNode, ProductVersionCertificate, TenantConnection
 )
+
 from app.models.product import (
     ProductCreate, ProductIdentityUpdate, ProductRead,
-    ProductMediaAdd, ProductMediaRead, ProductMediaReorder, ProductAssignmentRequest
+    ProductMediaAdd, ProductMediaRead, ProductMediaReorder, ProductAssignmentRequest,
+    ProductVersionDetailRead, ProductMaterialRead,
+    ProductSupplyNodeRead, ProductCertificateRead,
+    ProductCollaborationStatusRead
 )
 from app.utils.file_storage import save_base64_image
 from app.core.audit import _perform_audit_log
@@ -444,15 +449,7 @@ class ProductService:
     ):
         """
         Assigns a Product to a Supplier.
-
-        Logic:
-        1. Validates Brand owns Product.
-        2. Validates Supplier Profile belongs to Brand and is Connected.
-        3. VERSION LOGIC:
-           - If no versions exist: Creates v1 (Draft) using 'pending_version_name'.
-           - If latest is Locked (Submitted/Approved): Clones it to new v(N+1) Draft.
-           - If latest is Draft: Re-assigns ownership to new Supplier.
-        4. Creates 'ProductContributionRequest'.
+        Safe against duplicate active requests.
         """
         brand = self._get_brand_tenant(user)
 
@@ -466,18 +463,13 @@ class ProductService:
         if not profile or profile.tenant_id != brand.id:
             raise HTTPException(404, "Supplier profile not found.")
 
-        # Check the B2B Handshake
-        # We access the relationship 'connection' on SupplierProfile (1:1)
         connection = profile.connection
-
         if not connection:
             raise HTTPException(
                 400, "This supplier is not connected on the platform.")
-
         if connection.status != ConnectionStatus.ACTIVE:
             raise HTTPException(
                 400, "Cannot assign: Connection is not active.")
-
         if not connection.supplier_tenant_id:
             raise HTTPException(
                 400, "Cannot assign: Supplier has not completed onboarding (No Tenant ID).")
@@ -494,10 +486,8 @@ class ProductService:
         target_version = None
 
         if not existing_versions:
-            # SCENARIO A: First Assignment (Initialize v1)
-            # Use the name the brand set during shell creation, or fallback
+            # SCENARIO A: First Assignment
             v_name = product.pending_version_name or "Initial Version"
-
             target_version = ProductVersion(
                 product_id=product.id,
                 supplier_tenant_id=real_supplier_id,
@@ -506,8 +496,6 @@ class ProductService:
                 status=ProductVersionStatus.DRAFT
             )
             self.session.add(target_version)
-
-            # Clear the pending name from shell as it is now realized
             product.pending_version_name = None
             self.session.add(product)
             self.session.flush()
@@ -516,8 +504,7 @@ class ProductService:
             latest = existing_versions[0]
 
             if latest.status in [ProductVersionStatus.APPROVED, ProductVersionStatus.SUBMITTED]:
-                # SCENARIO B: Previous version locked -> Clone new Draft
-                # (Assuming _clone_version_structure helper exists in this class or util)
+                # SCENARIO B: Locked -> Clone new Draft
                 target_version = self._clone_version_helper(latest)
                 target_version.supplier_tenant_id = real_supplier_id
                 target_version.version_sequence = latest.version_sequence + 1
@@ -525,10 +512,42 @@ class ProductService:
                 self.session.add(target_version)
                 self.session.flush()
             else:
-                # SCENARIO C: Re-assigning an existing Draft
-                latest.supplier_tenant_id = real_supplier_id
+                # SCENARIO C: Existing Draft
+                # If we are re-assigning to a DIFFERENT supplier, update the ownership
+                if latest.supplier_tenant_id != real_supplier_id:
+                    latest.supplier_tenant_id = real_supplier_id
+                    self.session.add(latest)
                 target_version = latest
-                self.session.add(target_version)
+
+        # =========================================================
+        # INTEGRITY GUARD: PREVENT DUPLICATE ACTIVE REQUESTS
+        # =========================================================
+        # We only block if the status implies "Work is Happening".
+        # We DO NOT block if status is 'declined' (because we want to retry).
+        active_statuses = [
+            RequestStatus.SENT,
+            RequestStatus.ACCEPTED,
+            RequestStatus.IN_PROGRESS,
+            RequestStatus.CHANGES_REQUESTED,
+            RequestStatus.SUBMITTED
+        ]
+
+        # Check if there is already an open request for this specific version ID
+        existing_active_request = self.session.exec(
+            select(ProductContributionRequest)
+            .where(ProductContributionRequest.current_version_id == target_version.id)
+            .where(ProductContributionRequest.status.in_(active_statuses))
+        ).first()
+
+        if existing_active_request:
+            # If the user is trying to "re-send" to the SAME supplier who hasn't responded yet,
+            # we might just want to update the note/due date instead of erroring?
+            # Or strictly fail. Let's strictly fail to keep state clean.
+            raise HTTPException(
+                400,
+                f"Cannot assign: An active request ({existing_active_request.status}) is already pending for this version."
+            )
+        # =========================================================
 
         # 4. Create Workflow Request
         request = ProductContributionRequest(
@@ -583,3 +602,229 @@ class ProductService:
             total_energy_mj=source.total_energy_mj,
             total_water_usage=source.total_water_usage,
         )
+
+    # ==========================
+    # TECHNICAL DATA
+    # ==========================
+
+    def get_latest_version_detail(self, user: User, product_id: uuid.UUID) -> ProductVersionDetailRead:
+        """
+        Fetches the full technical data for the LATEST active version of a product.
+        """
+        brand = self._get_brand_tenant(user)
+
+        # 1. Verify Ownership
+        product = self.session.get(Product, product_id)
+        if not product or product.tenant_id != brand.id:
+            raise HTTPException(404, "Product not found.")
+
+        # 2. Get Latest Version with Eager Loading
+        statement = (
+            select(ProductVersion)
+            .where(ProductVersion.product_id == product_id)
+            .order_by(ProductVersion.version_sequence.desc())
+            .limit(1)
+            .options(
+                selectinload(ProductVersion.materials),
+                selectinload(ProductVersion.supply_chain),
+                selectinload(ProductVersion.certificates)
+            )
+        )
+        version = self.session.exec(statement).first()
+
+        if not version:
+            raise HTTPException(
+                404, "No technical versions found for this product.")
+
+        # 3. Map to DTO
+        return ProductVersionDetailRead(
+            id=version.id,
+            version_sequence=version.version_sequence,
+            version_name=version.version_name,
+            status=version.status,
+            created_at=version.created_at,
+            updated_at=version.updated_at,
+
+            manufacturing_country=version.manufacturing_country,
+            mass_kg=version.mass_kg,
+            total_carbon_footprint=version.total_carbon_footprint,
+            total_energy_mj=version.total_energy_mj,
+            total_water_usage=version.total_water_usage,
+
+            materials=[ProductMaterialRead(
+                id=m.id,
+                material_name=m.material_name,
+                percentage=m.percentage,
+                origin_country=m.origin_country,
+                transport_method=m.transport_method
+            ) for m in version.materials],
+
+            supply_chain=[ProductSupplyNodeRead(
+                id=s.id,
+                role=s.role,
+                company_name=s.company_name,
+                location_country=s.location_country
+            ) for s in version.supply_chain],
+
+            certificates=[ProductCertificateRead(
+                id=c.id,
+                certificate_type_id=c.certificate_type_id,
+                snapshot_name=c.snapshot_name,
+                snapshot_issuer=c.snapshot_issuer,
+                valid_until=c.valid_until,
+                file_url=c.file_url,
+                file_type=c.file_type
+            ) for c in version.certificates]
+        )
+
+    # ==========================
+    # COLLABORATION STATUS
+    # ==========================
+
+    def get_collaboration_status(self, user: User, product_id: uuid.UUID) -> ProductCollaborationStatusRead:
+        """
+        Returns the current workflow status of the product.
+        Checks the active Request linked to the latest version.
+        """
+        brand = self._get_brand_tenant(user)
+
+        # 1. Get Product & Latest Version
+        product = self.session.get(Product, product_id)
+        if not product or product.tenant_id != brand.id:
+            raise HTTPException(404, "Product not found.")
+
+        # Find latest version
+        version = self.session.exec(
+            select(ProductVersion)
+            .where(ProductVersion.product_id == product_id)
+            .order_by(ProductVersion.version_sequence.desc())
+        ).first()
+
+        if not version:
+            # Shell created, but no version init (rare)
+            return ProductCollaborationStatusRead(
+                active_request_id=None,
+                product_id=product.id,
+                latest_version_id=None,
+                request_status=None,
+                version_status=ProductVersionStatus.DRAFT,
+                last_updated_at=product.updated_at
+            )
+
+        # 2. Find THE Request defining the current state
+        # We fetch the SINGLE most recent request.
+        # Thanks to the Write Guard above, we know this is safe.
+        request = self.session.exec(
+            select(ProductContributionRequest)
+            .where(ProductContributionRequest.current_version_id == version.id)
+            .where(ProductContributionRequest.brand_tenant_id == brand.id)
+            # Strictly get the latest event
+            .order_by(ProductContributionRequest.created_at.desc())
+        ).first()
+
+        supplier_name = None
+        supplier_country = None
+        supplier_profile_id = None  # New
+
+        if request:
+            # 1. Get Name/Country from Real Tenant
+            supplier = self.session.get(Tenant, request.supplier_tenant_id)
+            if supplier:
+                supplier_name = supplier.name
+                supplier_country = supplier.location_country
+
+            # 2. Get Profile ID from Connection
+            # The Request has connection_id. The Connection has supplier_profile_id.
+            connection = self.session.get(
+                TenantConnection, request.connection_id)
+            if connection:
+                supplier_profile_id = connection.supplier_profile_id
+
+        return ProductCollaborationStatusRead(
+            active_request_id=request.id if request else None,
+
+            product_id=product.id,
+            latest_version_id=version.id,
+
+            # Request Status (e.g., IN_PROGRESS, SUBMITTED)
+            request_status=request.status if request else None,
+
+            # Version Status (e.g., DRAFT, APPROVED)
+            version_status=version.status,
+
+            assigned_supplier_name=supplier_name,
+
+            assigned_supplier_profile_id=supplier_profile_id,
+
+            supplier_country=supplier_country,
+            due_date=request.due_date if request else None,
+            last_updated_at=request.updated_at if request else version.updated_at
+        )
+
+    def cancel_request(self, user: User, product_id: uuid.UUID, request_id: uuid.UUID, reason: str):
+        brand = self._get_brand_tenant(user)
+
+        request = self.session.get(ProductContributionRequest, request_id)
+        if not request or request.brand_tenant_id != brand.id:
+            raise HTTPException(404, "Request not found.")
+
+        # Can only cancel if not completed/submitted/already cancelled
+        if request.status in [RequestStatus.COMPLETED, RequestStatus.SUBMITTED, RequestStatus.CANCELLED]:
+            raise HTTPException(
+                400, "Cannot cancel request in current status.")
+
+        request.status = RequestStatus.CANCELLED
+
+        # Add cancellation note
+        self.session.add(CollaborationComment(
+            request_id=request.id,
+            author_user_id=user.id,
+            body=f"Request Cancelled: {reason}",
+            is_rejection_reason=True
+        ))
+
+        self.session.add(request)
+        self.session.commit()
+        return {"message": "Request cancelled"}
+
+    def review_submission(self, user: User, product_id: uuid.UUID, request_id: uuid.UUID, action: str, comment_text: str = None):
+        brand = self._get_brand_tenant(user)
+
+        # 1. Fetch Request
+        request = self.session.get(ProductContributionRequest, request_id)
+        if not request or request.brand_tenant_id != brand.id:
+            raise HTTPException(404, "Request not found.")
+
+        version = self.session.get(ProductVersion, request.current_version_id)
+
+        # 2. Add Comment (if any)
+        if comment_text:
+            self.session.add(CollaborationComment(
+                request_id=request.id,
+                author_user_id=user.id,
+                body=comment_text,
+                is_rejection_reason=(action == 'request_changes')
+            ))
+
+        # 3. Handle Actions
+        if action == 'approve':
+            # Lock everything
+            request.status = RequestStatus.COMPLETED
+            version.status = ProductVersionStatus.APPROVED
+            # Explicitly mark 'was_valid_at_submission' for certs if needed here
+
+        elif action == 'request_changes':
+            # Push back to supplier
+            request.status = RequestStatus.CHANGES_REQUESTED
+            # Unlock the version for editing (Revert to Draft)
+            version.status = ProductVersionStatus.DRAFT
+
+        else:
+            raise HTTPException(
+                400, "Invalid action. Use 'approve' or 'request_changes'.")
+
+        self.session.add(request)
+        self.session.add(version)
+        self.session.commit()
+
+        return {"message": f"Submission {action}d successfully."}
