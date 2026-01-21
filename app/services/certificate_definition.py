@@ -1,12 +1,12 @@
 import uuid
 from typing import List, Optional
 from loguru import logger
-from sqlmodel import Session, select, or_, col
+from sqlmodel import Session, select, or_, col, update
 from fastapi import HTTPException, BackgroundTasks
 
 from app.db.schema import (
     User, Tenant, TenantType, CertificateDefinition,
-    CertificateCategory, AuditAction
+    CertificateCategory, AuditAction, ProductVersionCertificate
 )
 from app.models.certificate_definition import (
     CertificateDefinitionCreate,
@@ -50,34 +50,49 @@ class CertificateDefinitionService:
             )
         return tenant
 
-    def _check_uniqueness(self, tenant_id: uuid.UUID, name: str, exclude_id: Optional[uuid.UUID] = None):
+    def _check_uniqueness(self, tenant_id: uuid.UUID, name: Optional[str], code: Optional[str], exclude_id: Optional[uuid.UUID] = None):
         """
-        Enforces uniqueness for Name.
+        Enforces uniqueness for Name and Code.
         Scope: 
         1. The Tenant's own library.
         2. The System Global library (tenant_id is None).
 
-        Prevents creating a custom 'GOTS' if System 'GOTS' exists.
+        You cannot create a certificate named "GOTS" if "GOTS" already exists in the System.
         """
+        # Base Query: Look in System Global OR Current Tenant
         statement = select(CertificateDefinition).where(
             or_(
-                CertificateDefinition.tenant_id == tenant_id,  # My Private
-                CertificateDefinition.tenant_id == None       # System Global
+                CertificateDefinition.tenant_id == tenant_id,
+                CertificateDefinition.tenant_id == None
             )
-        ).where(
-            CertificateDefinition.name == name
         )
 
+        # Filter: Match Name OR Code
+        conditions = []
+        if name:
+            conditions.append(CertificateDefinition.name == name)
+        if code:
+            conditions.append(CertificateDefinition.code == code)
+
+        if not conditions:
+            return
+
+        statement = statement.where(or_(*conditions))
+
+        # Exclude current record (for Updates)
         if exclude_id:
             statement = statement.where(CertificateDefinition.id != exclude_id)
 
         existing = self.session.exec(statement).first()
 
         if existing:
-            owner = "System Global Library" if existing.tenant_id is None else "Your Custom Library"
+            # Determine which field caused the conflict for a better error message
+            conflict_field = "Name" if existing.name == name else "Code"
+            owner = "System Global" if existing.tenant_id is None else "Your Library"
+
             raise HTTPException(
                 status_code=409,
-                detail=f"Conflict: The certificate name '{name}' already exists in {owner}."
+                detail=f"Conflict detected: The {conflict_field} '{getattr(existing, conflict_field.lower())}' already exists in {owner}."
             )
 
     # ==========================================================================
@@ -85,6 +100,10 @@ class CertificateDefinitionService:
     # ==========================================================================
 
     def list_definitions(self, user: User, query: Optional[str] = None, category: Optional[CertificateCategory] = None) -> List[CertificateDefinitionRead]:
+        """
+        View Certificates.
+        Visibility: System Global Records + Records created by this Tenant.
+        """
         tenant = self._get_active_tenant(user)
 
         statement = select(CertificateDefinition).where(
@@ -107,16 +126,19 @@ class CertificateDefinitionService:
             statement = statement.where(
                 CertificateDefinition.category == category)
 
-        statement = statement.order_by(CertificateDefinition.name.asc())
+        statement = statement.order_by(CertificateDefinition.updated_at.desc())
         results = self.session.exec(statement).all()
 
         return [
             CertificateDefinitionRead(
                 id=c.id,
                 name=c.name,
+                code=c.code,
                 issuer_authority=c.issuer_authority,
                 category=c.category,
                 description=c.description,
+                created_at=c.created_at,
+                updated_at=c.updated_at,
                 is_system=(c.tenant_id is None)
             )
             for c in results
@@ -132,15 +154,18 @@ class CertificateDefinitionService:
         data: CertificateDefinitionCreate,
         background_tasks: BackgroundTasks
     ) -> CertificateDefinitionRead:
-
+        """
+        Create private certificate (Supplier).
+        """
         tenant = self._get_supplier_context(user)
 
-        # UPDATED: Check Name Uniqueness against Tenant AND System
-        self._check_uniqueness(tenant.id, data.name)
+        # Check Uniqueness (Name AND Code against Tenant AND System)
+        self._check_uniqueness(tenant.id, data.name, data.code)
 
         definition = CertificateDefinition(
             tenant_id=tenant.id,
             name=data.name,
+            code=data.code,
             issuer_authority=data.issuer_authority,
             category=data.category,
             description=data.description
@@ -166,9 +191,12 @@ class CertificateDefinitionService:
             return CertificateDefinitionRead(
                 id=definition.id,
                 name=definition.name,
+                code=definition.code,
                 issuer_authority=definition.issuer_authority,
                 category=definition.category,
                 description=definition.description,
+                created_at=definition.created_at,
+                updated_at=definition.updated_at,
                 is_system=False
             )
         except HTTPException:
@@ -186,10 +214,12 @@ class CertificateDefinitionService:
         data: CertificateDefinitionUpdate,
         background_tasks: BackgroundTasks
     ) -> CertificateDefinitionRead:
-
+        """
+        Update OWN certificate.
+        """
         tenant = self._get_supplier_context(user)
-        definition = self.session.get(CertificateDefinition, def_id)
 
+        definition = self.session.get(CertificateDefinition, def_id)
         if not definition:
             raise HTTPException(
                 status_code=404, detail="Certificate definition not found.")
@@ -203,14 +233,24 @@ class CertificateDefinitionService:
 
         old_state = definition.model_dump()
 
-        # UPDATED: Check uniqueness if name changes
-        if data.name is not None and data.name != definition.name:
-            self._check_uniqueness(tenant.id, data.name,
-                                   exclude_id=definition.id)
+        # Check Uniqueness only if fields are changing
+        # We pass values only if they are not None, to check for conflicts
+        check_name = data.name if data.name != definition.name else None
+        check_code = data.code if data.code != definition.code else None
+
+        if check_name or check_code:
+            self._check_uniqueness(
+                tenant.id,
+                check_name if check_name else None,
+                check_code if check_code else None,
+                exclude_id=definition.id
+            )
 
         # Apply Updates
         if data.name:
             definition.name = data.name
+        if data.code:
+            definition.code = data.code
         if data.issuer_authority:
             definition.issuer_authority = data.issuer_authority
         if data.category:
@@ -239,9 +279,12 @@ class CertificateDefinitionService:
         return CertificateDefinitionRead(
             id=definition.id,
             name=definition.name,
+            code=definition.code,
             issuer_authority=definition.issuer_authority,
             category=definition.category,
             description=definition.description,
+            created_at=definition.created_at,
+            updated_at=definition.updated_at,
             is_system=False
         )
 
@@ -251,9 +294,15 @@ class CertificateDefinitionService:
         def_id: uuid.UUID,
         background_tasks: BackgroundTasks
     ):
-        tenant = self._get_supplier_context(user)
-        definition = self.session.get(CertificateDefinition, def_id)
+        """
+        Delete OWN certificate.
 
+        This explicitly unlinks any ProductVersionCertificate that reference this certificate
+        and logs exactly which versions were affected.
+        """
+        tenant = self._get_supplier_context(user)
+
+        definition = self.session.get(CertificateDefinition, def_id)
         if not definition:
             raise HTTPException(
                 status_code=404, detail="Certificate definition not found.")
@@ -263,8 +312,30 @@ class CertificateDefinitionService:
                 status_code=403, detail="You cannot delete System Definitions.")
 
         snapshot_name = definition.name
+        snapshot_code = definition.code
 
         try:
+            # 1. Identify which records will be affected (for the Audit Log)
+            # We select just the ID (and optionally version_id) to keep it lightweight
+            affected_records_stmt = select(ProductVersionCertificate.id).where(
+                ProductVersionCertificate.certificate_type_id == def_id
+            )
+            # exec().all() returns a list of UUIDs because we selected a single column
+            affected_pvm_ids = self.session.exec(affected_records_stmt).all()
+
+            # Convert UUIDs to strings for JSON serialization in the audit log
+            affected_pvm_ids_str = [str(pid) for pid in affected_pvm_ids]
+
+            # 2. Unlink the material (Set FK to NULL)
+            if affected_pvm_ids:
+                unlink_statement = (
+                    update(ProductVersionCertificate)
+                    .where(col(ProductVersionCertificate.id).in_(affected_pvm_ids))
+                    .values(certificate_type_id=None)
+                )
+                self.session.exec(unlink_statement)
+
+            # 3. Delete the definition
             self.session.delete(definition)
             self.session.commit()
 
@@ -276,7 +347,12 @@ class CertificateDefinitionService:
                 entity_type="CertificateDefinition",
                 entity_id=def_id,
                 action=AuditAction.DELETE,
-                changes={"name": snapshot_name}
+                changes={
+                    "name": snapshot_name,
+                    "code": snapshot_code,
+                    "unlinked_product_version_certificate_ids": affected_pvm_ids_str,
+                    "unlinked_count": len(affected_pvm_ids_str)
+                }
             )
 
             return {"message": "Certificate definition deleted successfully."}

@@ -69,6 +69,30 @@ class ConnectionStatus(str, Enum):
     SUSPENDED = "suspended"   # Connection paused (e.g., Contract ended).
 
 
+class RelationshipType(str, Enum):
+    """
+    Describes the role of the TARGET relative to the REQUESTER.
+    """
+    # The Target provides goods or data UPSTREAM to the Requester.
+    # Used for: Brand->Supplier, Supplier->SubSupplier, Brand->MaterialProvider
+    SUPPLIER = "supplier"
+
+    # The Target receives goods or data DOWNSTREAM from the Requester.
+    # Used for: Supplier->Brand (if supplier invites), Brand->Retailer
+    CUSTOMER = "customer"
+
+    # The Target takes the product at End-of-Life.
+    # Used for: Brand->Recycler, Supplier->WasteManager
+    RECYCLER = "recycler"
+
+    # The Target verifies data (Read Only).
+    # Used for: Brand->Auditor, Supplier->Lab
+    AUDITOR = "auditor"
+
+    # Generic Horizontal Partnership (Consultants, Agencies).
+    PARTNER = "partner"
+
+
 # ==============================================================================
 # 2. COLLABORATION & WORKFLOW
 # Defines how Brands and Suppliers interact to generate data.
@@ -670,12 +694,47 @@ class SupplierProfile(TimestampMixin, SQLModel, table=True):
         description="The Brand that owns this specific address book entry."
     )
 
-    # The Link (The Real Supplier)
-    connected_tenant_id: Optional[uuid.UUID] = Field(
+    # 1. THE LINK TO THE HANDSHAKE
+    # This acts as the single source of truth for the relationship status.
+    # It allows you to find the invite token, retry count, or status (Pending/Active)
+    # without needing to query a separate table using complex WHERE clauses.
+    connection_id: Optional[uuid.UUID] = Field(
+        default=None,
+        foreign_key="tenantconnection.id",
+        unique=True,
+        description="Pointer to the active or pending connection handshake."
+    )
+
+    # Demormalized fields
+    supplier_tenant_id: Optional[uuid.UUID] = Field(
         foreign_key="tenant.id",
         default=None,
         index=True,
         description="DENORMALIZED: If linked, this points to the real Supplier Tenant. Source of truth is TenantConnection."
+    )
+
+    connection_status: ConnectionStatus = Field(
+        default=ConnectionStatus.PENDING,
+        index=True,
+        description="Denormalized status of the B2B link. Kept in sync with TenantConnection."
+    )
+
+    retry_count: int = Field(
+        default=0,
+        description="Denormalized count of invite attempts. Used to disable UI buttons (limit 3) without joining the connection table."
+    )
+
+    slug: Optional[str] = Field(
+        default=None,
+        index=True,
+        description="DENORMALIZED: The public slug of the connected Supplier Tenant. "
+                    "Populated automatically from the linked Tenant (via TenantConnection.target_tenant_id -> Tenant.slug) "
+                    "when a connection is established."
+    )
+
+    invitation_email: Optional[str] = Field(
+        default=None,
+        description="DENORMALIZED: The email address used for the initial invitation."
     )
 
     # Profile Data (Managed by Brand)
@@ -703,16 +762,15 @@ class SupplierProfile(TimestampMixin, SQLModel, table=True):
     )
 
     # The Real Supplier Tenant Object (Useful for code access)
-    connected_tenant: Optional["Tenant"] = Relationship(
+    supplier_tenant: Optional["Tenant"] = Relationship(
         sa_relationship_kwargs={
-            "foreign_keys": "SupplierProfile.connected_tenant_id"}
+            "foreign_keys": "SupplierProfile.supplier_tenant_id"}
     )
 
     # 1:1 Connection State
     connection: Optional["TenantConnection"] = Relationship(
-        back_populates="supplier_profile",
         sa_relationship_kwargs={
-            "cascade": "all, delete-orphan", "uselist": False}
+            "foreign_keys": "SupplierProfile.connection_id"}
     )
 
 
@@ -720,18 +778,23 @@ class TenantConnection(TimestampMixin, SQLModel, table=True):
     """The active link between Brand and Supplier."""
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
 
-    brand_tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
-    supplier_tenant_id: Optional[uuid.UUID] = Field(
-        foreign_key="tenant.id", default=None)
+    # Who is asking?
+    requester_tenant_id: uuid.UUID = Field(foreign_key="tenant.id", index=True)
 
-    # The Link
-    supplier_profile_id: uuid.UUID = Field(
-        foreign_key="supplierprofile.id",
-        unique=True  # Enforces 1:1
+    # Who are they connecting to? (Nullable if they haven't registered yet)
+    target_tenant_id: Optional[uuid.UUID] = Field(
+        foreign_key="tenant.id", default=None, index=True)
+
+    type: RelationshipType = Field(
+        default=RelationshipType.SUPPLIER,
+        index=True,
+        description="Defines what the Target is to the Requester. "
+                    "Example: If Brand invites Factory, type is SUPPLIER. "
+                    "If Factory invites Sub-Factory, type is also SUPPLIER."
     )
 
     # Audit / Transactional Field
-    supplier_email_invite: Optional[str] = Field(
+    invitation_email: Optional[str] = Field(
         default=None,
         description="If invited via email, this stores the target address for audit/retry."
     )
@@ -787,6 +850,11 @@ class CertificateDefinition(TimestampMixin, SQLModel, table=True):
         description="The official legal name of the standard or certification. Example: 'Global Organic Textile Standard (GOTS) v7.0'."
     )
 
+    code: str = Field(
+        index=True,
+        description="Short identifier, acronym, or internal ERP code. E.g., 'GOTS-7', 'ISO-14001', 'INT-LAB-01'."
+    )
+
     issuer_authority: str = Field(
         description="The governing body or organization that officially owns and manages this standard. Example: 'Global Standard gGmbH' or 'ISO'."
     )
@@ -834,6 +902,9 @@ class MaterialDefinition(TimestampMixin, SQLModel, table=True):
 
     tenant: Optional[Tenant] = Relationship(
         back_populates="material_definitions")
+
+    product_version_material_usages: List["ProductVersionMaterial"] = Relationship(
+        back_populates="source_material_definition", sa_relationship_kwargs={"passive_deletes": "all"})
 
 
 class SupplierArtifact(TimestampMixin, SQLModel, table=True):
@@ -1274,6 +1345,9 @@ class ProductVersionMaterial(TimestampMixin, SQLModel, table=True):
 
     # Provenance
     source_material_definition_id: Optional[uuid.UUID] = Field(
+        default=None,
+        foreign_key="materialdefinition.id",
+        ondelete="SET NULL",
         description="Reference to the original library item (for lineage), if it exists."
     )
 
@@ -1299,6 +1373,8 @@ class ProductVersionMaterial(TimestampMixin, SQLModel, table=True):
         description="The specific lot/batch number of the raw material used.")
 
     version: ProductVersion = Relationship(back_populates="materials")
+    source_material_definition: Optional[MaterialDefinition] = Relationship(
+        back_populates="product_version_material_usages")
 
 
 class ProductVersionSupplyNode(TimestampMixin, SQLModel, table=True):

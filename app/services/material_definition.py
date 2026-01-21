@@ -1,11 +1,11 @@
 import uuid
 from typing import List, Optional
 from loguru import logger
-from sqlmodel import Session, select, or_, col
+from sqlmodel import Session, select, update, or_, col
 from fastapi import HTTPException, BackgroundTasks
 
 from app.db.schema import (
-    User, Tenant, TenantType, MaterialDefinition, AuditAction
+    User, Tenant, TenantType, MaterialDefinition, ProductVersionMaterial, AuditAction
 )
 from app.models.material_definition import (
     MaterialDefinitionCreate,
@@ -122,7 +122,7 @@ class MaterialDefinitionService:
                 )
             )
 
-        statement = statement.order_by(MaterialDefinition.name.asc())
+        statement = statement.order_by(MaterialDefinition.updated_at.desc())
         results = self.session.exec(statement).all()
 
         return [
@@ -133,6 +133,8 @@ class MaterialDefinitionService:
                 description=m.description,
                 material_type=m.material_type,
                 default_carbon_footprint=m.default_carbon_footprint,
+                created_at=m.created_at,
+                updated_at=m.updated_at,
                 is_system=(m.tenant_id is None)
             )
             for m in results
@@ -149,7 +151,7 @@ class MaterialDefinitionService:
         background_tasks: BackgroundTasks
     ) -> MaterialDefinitionRead:
         """
-        Create private material (Supplier) or Global material (Admin).
+        Create private material (Supplier).
         """
         tenant = self._get_supplier_context(user)
 
@@ -189,6 +191,8 @@ class MaterialDefinitionService:
                 description=material.description,
                 material_type=material.material_type,
                 default_carbon_footprint=material.default_carbon_footprint,
+                created_at=material.created_at,
+                updated_at=material.updated_at,
                 is_system=False
             )
         except HTTPException:
@@ -228,14 +232,21 @@ class MaterialDefinitionService:
         # Check Uniqueness only if fields are changing
         # We pass values only if they are not None, to check for conflicts
         check_name = data.name if data.name != material.name else None
+        check_code = data.code if data.code != material.code else None
 
-        if check_name:
-            self._check_uniqueness(tenant.id, check_name,
-                                   None, exclude_id=material.id)
+        if check_name or check_code:
+            self._check_uniqueness(
+                tenant.id,
+                check_name if check_name else None,
+                check_code if check_code else None,
+                exclude_id=material.id
+            )
 
         # Apply Updates
         if data.name:
             material.name = data.name
+        if data.code:
+            material.code = data.code
         if data.description is not None:
             material.description = data.description
         if data.material_type:
@@ -268,6 +279,8 @@ class MaterialDefinitionService:
             description=material.description,
             material_type=material.material_type,
             default_carbon_footprint=material.default_carbon_footprint,
+            created_at=material.created_at,
+            updated_at=material.updated_at,
             is_system=False
         )
 
@@ -279,6 +292,9 @@ class MaterialDefinitionService:
     ):
         """
         Delete OWN material.
+
+        This explicitly unlinks any ProductVersionMaterials that reference this material
+        and logs exactly which versions were affected.
         """
         tenant = self._get_supplier_context(user)
 
@@ -294,12 +310,35 @@ class MaterialDefinitionService:
             )
 
         snapshot_name = material.name
+        snapshot_code = material.code
 
         try:
+            # 1. Identify which records will be affected (for the Audit Log)
+            # We select just the ID (and optionally version_id) to keep it lightweight
+            affected_records_stmt = select(ProductVersionMaterial.id).where(
+                ProductVersionMaterial.source_material_definition_id == material_id
+            )
+            # exec().all() returns a list of UUIDs because we selected a single column
+            affected_pvm_ids = self.session.exec(affected_records_stmt).all()
+
+            # Convert UUIDs to strings for JSON serialization in the audit log
+            affected_pvm_ids_str = [str(pid) for pid in affected_pvm_ids]
+
+            # 2. Unlink the material (Set FK to NULL)
+            if affected_pvm_ids:
+                unlink_statement = (
+                    update(ProductVersionMaterial)
+                    .where(col(ProductVersionMaterial.id).in_(affected_pvm_ids))
+                    .values(source_material_definition_id=None)
+                )
+                self.session.exec(unlink_statement)
+
+            # 3. Delete the definition
             self.session.delete(material)
+
             self.session.commit()
 
-            # Audit Log
+            # 4. Audit Log
             background_tasks.add_task(
                 _perform_audit_log,
                 tenant_id=tenant.id,
@@ -307,14 +346,23 @@ class MaterialDefinitionService:
                 entity_type="MaterialDefinition",
                 entity_id=material_id,
                 action=AuditAction.DELETE,
-                changes={"name": snapshot_name, "code": material.code}
+                changes={
+                    "name": snapshot_name,
+                    "code": snapshot_code,
+                    "unlinked_product_version_material_ids": affected_pvm_ids_str,
+                    "unlinked_count": len(affected_pvm_ids_str)
+                }
             )
 
-            return {"message": "Material deleted successfully."}
+            return {
+                "message": "Material deleted successfully.",
+                "unlinked_count": len(affected_pvm_ids_str)
+            }
+
         except Exception as e:
             self.session.rollback()
-            # This happens if the material is linked to a ProductVersionMaterial
+            print(f"Error deleting material: {e}")
             raise HTTPException(
-                status_code=400,
-                detail="Cannot delete this material because it is currently used in a product batch."
+                status_code=500,
+                detail="An error occurred while deleting the material."
             )

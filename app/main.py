@@ -7,7 +7,9 @@ from app.api.v1 import index
 from app.api.v1 import user
 from app.api.v1 import material_definition
 from app.api.v1 import certification_definition
-from app.api.v1 import supplier
+from app.api.v1 import supplier_profile
+from app.api.v1 import supplier_dashboard
+from app.api.v1 import tenant_connection
 from app.api.v1 import product
 from app.api.v1 import product_contribution
 
@@ -39,8 +41,12 @@ app.include_router(
     material_definition.router, prefix="/api/v1/materials", tags=["Materials"])
 app.include_router(certification_definition.router,
                    prefix="/api/v1/certifications", tags=["Certifications"])
-app.include_router(supplier.router,
-                   prefix="/api/v1/suppliers", tags=["Suppliers"])
+app.include_router(supplier_profile.router,
+                   prefix="/api/v1/supplier-profiles", tags=["Supplier Profiles"])
+app.include_router(supplier_dashboard.router,
+                   prefix="/api/v1/supplier-dashboard", tags=["Supplier Dashboard"])
+app.include_router(tenant_connection.router,
+                   prefix="/api/v1/tenant-connections", tags=["Tenant Connections"])
 app.include_router(
     product.router,
     prefix="/api/v1/products",

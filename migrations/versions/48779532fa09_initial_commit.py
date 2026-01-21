@@ -1,8 +1,8 @@
-"""Initial
+"""Initial Commit
 
-Revision ID: 893fddaabd53
+Revision ID: 48779532fa09
 Revises: 
-Create Date: 2026-01-15 22:51:36.233574
+Create Date: 2026-01-21 23:33:34.036590
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '893fddaabd53'
+revision: str = '48779532fa09'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -62,12 +62,14 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('tenant_id', sa.Uuid(), nullable=True),
     sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('code', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('issuer_authority', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('category', sa.Enum('ENVIRONMENTAL', 'SOCIAL', 'CHEMICAL_SAFETY', 'ORIGIN', 'GOVERNANCE', 'QUALITY', 'OTHER', name='certificatecategory'), nullable=False),
     sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_index(op.f('ix_certificatedefinition_code'), 'certificatedefinition', ['code'], unique=False)
     op.create_index(op.f('ix_certificatedefinition_name'), 'certificatedefinition', ['name'], unique=False)
     op.create_table('dpptemplate',
     sa.Column('is_deleted', sa.Boolean(), nullable=False),
@@ -154,25 +156,6 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
-    op.create_table('supplierprofile',
-    sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('tenant_id', sa.Uuid(), nullable=False),
-    sa.Column('connected_tenant_id', sa.Uuid(), nullable=True),
-    sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-    sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('location_country', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-    sa.Column('contact_email', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('contact_name', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('is_favorite', sa.Boolean(), nullable=False),
-    sa.ForeignKeyConstraint(['connected_tenant_id'], ['tenant.id'], ),
-    sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
-    sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index(op.f('ix_supplierprofile_connected_tenant_id'), 'supplierprofile', ['connected_tenant_id'], unique=False)
-    op.create_index(op.f('ix_supplierprofile_location_country'), 'supplierprofile', ['location_country'], unique=False)
-    op.create_index(op.f('ix_supplierprofile_tenant_id'), 'supplierprofile', ['tenant_id'], unique=False)
     op.create_table('systemauditlog',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
@@ -195,6 +178,26 @@ def upgrade() -> None:
     op.create_index(op.f('ix_systemauditlog_entity_type'), 'systemauditlog', ['entity_type'], unique=False)
     op.create_index(op.f('ix_systemauditlog_tenant_id'), 'systemauditlog', ['tenant_id'], unique=False)
     op.create_index(op.f('ix_systemauditlog_timestamp'), 'systemauditlog', ['timestamp'], unique=False)
+    op.create_table('tenantconnection',
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('requester_tenant_id', sa.Uuid(), nullable=False),
+    sa.Column('target_tenant_id', sa.Uuid(), nullable=True),
+    sa.Column('type', sa.Enum('SUPPLIER', 'CUSTOMER', 'RECYCLER', 'AUDITOR', 'PARTNER', name='relationshiptype'), nullable=False),
+    sa.Column('invitation_email', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('invitation_token', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('retry_count', sa.Integer(), nullable=False),
+    sa.Column('request_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('status', sa.Enum('PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED', name='connectionstatus'), nullable=False),
+    sa.ForeignKeyConstraint(['requester_tenant_id'], ['tenant.id'], ),
+    sa.ForeignKeyConstraint(['target_tenant_id'], ['tenant.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_tenantconnection_invitation_token'), 'tenantconnection', ['invitation_token'], unique=True)
+    op.create_index(op.f('ix_tenantconnection_requester_tenant_id'), 'tenantconnection', ['requester_tenant_id'], unique=False)
+    op.create_index(op.f('ix_tenantconnection_target_tenant_id'), 'tenantconnection', ['target_tenant_id'], unique=False)
+    op.create_index(op.f('ix_tenantconnection_type'), 'tenantconnection', ['type'], unique=False)
     op.create_table('dpp',
     sa.Column('is_deleted', sa.Boolean(), nullable=False),
     sa.Column('deleted_at', sa.DateTime(), nullable=True),
@@ -266,6 +269,8 @@ def upgrade() -> None:
     sa.Column('manufacturing_country', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('mass_kg', sa.Float(), nullable=False),
     sa.Column('total_carbon_footprint', sa.Float(), nullable=False),
+    sa.Column('total_energy_mj', sa.Float(), nullable=False),
+    sa.Column('total_water_usage', sa.Float(), nullable=False),
     sa.ForeignKeyConstraint(['product_id'], ['product.id'], ),
     sa.ForeignKeyConstraint(['supplier_tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id')
@@ -280,26 +285,34 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['role_id'], ['role.id'], ),
     sa.PrimaryKeyConstraint('role_id', 'permission_id')
     )
-    op.create_table('tenantconnection',
+    op.create_table('supplierprofile',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('brand_tenant_id', sa.Uuid(), nullable=False),
+    sa.Column('tenant_id', sa.Uuid(), nullable=False),
+    sa.Column('connection_id', sa.Uuid(), nullable=True),
     sa.Column('supplier_tenant_id', sa.Uuid(), nullable=True),
-    sa.Column('supplier_profile_id', sa.Uuid(), nullable=False),
-    sa.Column('supplier_email_invite', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('invitation_token', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('connection_status', sa.Enum('PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED', name='connectionstatus'), nullable=False),
     sa.Column('retry_count', sa.Integer(), nullable=False),
-    sa.Column('request_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('status', sa.Enum('PENDING', 'ACTIVE', 'REJECTED', 'SUSPENDED', name='connectionstatus'), nullable=False),
-    sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
-    sa.ForeignKeyConstraint(['supplier_profile_id'], ['supplierprofile.id'], ),
+    sa.Column('slug', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('invitation_email', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('description', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('location_country', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('contact_email', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('contact_name', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('is_favorite', sa.Boolean(), nullable=False),
+    sa.ForeignKeyConstraint(['connection_id'], ['tenantconnection.id'], ),
     sa.ForeignKeyConstraint(['supplier_tenant_id'], ['tenant.id'], ),
+    sa.ForeignKeyConstraint(['tenant_id'], ['tenant.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('supplier_profile_id')
+    sa.UniqueConstraint('connection_id')
     )
-    op.create_index(op.f('ix_tenantconnection_brand_tenant_id'), 'tenantconnection', ['brand_tenant_id'], unique=False)
-    op.create_index(op.f('ix_tenantconnection_invitation_token'), 'tenantconnection', ['invitation_token'], unique=True)
+    op.create_index(op.f('ix_supplierprofile_connection_status'), 'supplierprofile', ['connection_status'], unique=False)
+    op.create_index(op.f('ix_supplierprofile_location_country'), 'supplierprofile', ['location_country'], unique=False)
+    op.create_index(op.f('ix_supplierprofile_slug'), 'supplierprofile', ['slug'], unique=False)
+    op.create_index(op.f('ix_supplierprofile_supplier_tenant_id'), 'supplierprofile', ['supplier_tenant_id'], unique=False)
+    op.create_index(op.f('ix_supplierprofile_tenant_id'), 'supplierprofile', ['tenant_id'], unique=False)
     op.create_table('tenantinvitation',
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
@@ -388,7 +401,7 @@ def upgrade() -> None:
     sa.Column('current_version_id', sa.Uuid(), nullable=False),
     sa.Column('due_date', sa.Date(), nullable=True),
     sa.Column('request_note', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
-    sa.Column('status', sa.Enum('SENT', 'ACCEPTED', 'DECLINED', 'IN_PROGRESS', 'SUBMITTED', 'CHANGES_REQUESTED', 'COMPLETED', name='requeststatus'), nullable=False),
+    sa.Column('status', sa.Enum('SENT', 'ACCEPTED', 'DECLINED', 'IN_PROGRESS', 'SUBMITTED', 'CHANGES_REQUESTED', 'COMPLETED', 'CANCELLED', name='requeststatus'), nullable=False),
     sa.ForeignKeyConstraint(['brand_tenant_id'], ['tenant.id'], ),
     sa.ForeignKeyConstraint(['connection_id'], ['tenantconnection.id'], ),
     sa.ForeignKeyConstraint(['current_version_id'], ['productversion.id'], ),
@@ -454,8 +467,10 @@ def upgrade() -> None:
     sa.Column('material_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('percentage', sa.Float(), nullable=False),
     sa.Column('origin_country', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('transport_method', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('visibility', sa.Enum('PUBLIC', 'RESTRICTED_AUDIT', 'RESTRICTED_RECYCLE', 'INTERNAL', name='visibilityscope'), nullable=False),
     sa.Column('batch_number', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.ForeignKeyConstraint(['source_material_definition_id'], ['materialdefinition.id'], ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['version_id'], ['productversion.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -626,9 +641,12 @@ def downgrade() -> None:
     op.drop_table('tenantmember')
     op.drop_index(op.f('ix_tenantinvitation_email'), table_name='tenantinvitation')
     op.drop_table('tenantinvitation')
-    op.drop_index(op.f('ix_tenantconnection_invitation_token'), table_name='tenantconnection')
-    op.drop_index(op.f('ix_tenantconnection_brand_tenant_id'), table_name='tenantconnection')
-    op.drop_table('tenantconnection')
+    op.drop_index(op.f('ix_supplierprofile_tenant_id'), table_name='supplierprofile')
+    op.drop_index(op.f('ix_supplierprofile_supplier_tenant_id'), table_name='supplierprofile')
+    op.drop_index(op.f('ix_supplierprofile_slug'), table_name='supplierprofile')
+    op.drop_index(op.f('ix_supplierprofile_location_country'), table_name='supplierprofile')
+    op.drop_index(op.f('ix_supplierprofile_connection_status'), table_name='supplierprofile')
+    op.drop_table('supplierprofile')
     op.drop_table('rolepermissionlink')
     op.drop_index(op.f('ix_productversion_version_sequence'), table_name='productversion')
     op.drop_table('productversion')
@@ -643,16 +661,17 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_dpp_product_id'), table_name='dpp')
     op.drop_index(op.f('ix_dpp_is_deleted'), table_name='dpp')
     op.drop_table('dpp')
+    op.drop_index(op.f('ix_tenantconnection_type'), table_name='tenantconnection')
+    op.drop_index(op.f('ix_tenantconnection_target_tenant_id'), table_name='tenantconnection')
+    op.drop_index(op.f('ix_tenantconnection_requester_tenant_id'), table_name='tenantconnection')
+    op.drop_index(op.f('ix_tenantconnection_invitation_token'), table_name='tenantconnection')
+    op.drop_table('tenantconnection')
     op.drop_index(op.f('ix_systemauditlog_timestamp'), table_name='systemauditlog')
     op.drop_index(op.f('ix_systemauditlog_tenant_id'), table_name='systemauditlog')
     op.drop_index(op.f('ix_systemauditlog_entity_type'), table_name='systemauditlog')
     op.drop_index(op.f('ix_systemauditlog_entity_id'), table_name='systemauditlog')
     op.drop_index(op.f('ix_systemauditlog_actor_user_id'), table_name='systemauditlog')
     op.drop_table('systemauditlog')
-    op.drop_index(op.f('ix_supplierprofile_tenant_id'), table_name='supplierprofile')
-    op.drop_index(op.f('ix_supplierprofile_location_country'), table_name='supplierprofile')
-    op.drop_index(op.f('ix_supplierprofile_connected_tenant_id'), table_name='supplierprofile')
-    op.drop_table('supplierprofile')
     op.drop_table('supplierartifact')
     op.drop_index(op.f('ix_role_name'), table_name='role')
     op.drop_table('role')
@@ -669,6 +688,7 @@ def downgrade() -> None:
     op.drop_index('idx_dpptemplate_layout', table_name='dpptemplate', postgresql_using='gin')
     op.drop_table('dpptemplate')
     op.drop_index(op.f('ix_certificatedefinition_name'), table_name='certificatedefinition')
+    op.drop_index(op.f('ix_certificatedefinition_code'), table_name='certificatedefinition')
     op.drop_table('certificatedefinition')
     op.drop_index(op.f('ix_user_email'), table_name='user')
     op.drop_table('user')

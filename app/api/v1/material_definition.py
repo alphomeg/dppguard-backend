@@ -17,6 +17,7 @@ router = APIRouter()
 @router.get(
     "/",
     response_model=List[MaterialDefinitionRead],
+    status_code=status.HTTP_200_OK,
     summary="List Supplier Materials",
     description="Retrieve System Standards + Your Custom Materials. (Suppliers Only)"
 )
@@ -49,6 +50,7 @@ def create_material(
 @router.patch(
     "/{material_id}",
     response_model=MaterialDefinitionRead,
+    status_code=status.HTTP_200_OK,
     summary="Update Material",
     description="Update a custom material. (Suppliers Only - Cannot edit System data)"
 )
@@ -65,6 +67,7 @@ def update_material(
 
 @router.delete(
     "/{material_id}",
+    status_code=status.HTTP_200_OK,
     summary="Delete Material",
     description="Remove a custom material. (Suppliers Only)"
 )

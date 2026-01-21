@@ -13,7 +13,11 @@ from app.services.material_definition import MaterialDefinitionService
 
 from app.services.certificate_definition import CertificateDefinitionService
 
-from app.services.supplier import SupplierService
+from app.services.supplier_profile import SupplierProfileService
+
+from app.services.supplier_dashboard import SupplierDashboardService
+
+from app.services.tenant_connection import TenantConnectionService
 
 from app.services.product import ProductService
 
@@ -57,9 +61,19 @@ def get_product_contribution_service(session=Depends(get_session)) -> ProductCon
 #     return CollaborationService(session)
 
 
-def get_supplier_service(session: Session = Depends(get_session)) -> SupplierService:
-    """Dependency injection for SupplierService."""
-    return SupplierService(session)
+def get_supplier_service(session: Session = Depends(get_session)) -> SupplierProfileService:
+    """Dependency injection for SupplierProfileService."""
+    return SupplierProfileService(session)
+
+
+def get_supplier_dashboard_service(session: Session = Depends(get_session)) -> SupplierDashboardService:
+    """Dependency injection for SupplierDashboardService."""
+    return SupplierDashboardService(session)
+
+
+def get_tenant_connection_service(session=Depends(get_session)) -> TenantConnectionService:
+    """Dependency injection for TenantConnectionService."""
+    return TenantConnectionService(session)
 
 
 def get_current_user(

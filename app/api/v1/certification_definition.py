@@ -19,7 +19,7 @@ router = APIRouter()
     response_model=List[CertificateDefinitionRead],
     status_code=status.HTTP_200_OK,
     summary="List Certificate Definitions",
-    description="Retrieve all certificate standards (System Global + Tenant Custom) available to the current user. Supports filtering by name and category."
+    description="Retrieve all certificate standards (System Global + Supplier Custom) available to the current user. Supports filtering by name and category."
 )
 def list_certificate_definitions(
     q: Optional[str] = Query(None, description="Search by Name or Issuer"),
