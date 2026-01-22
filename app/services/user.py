@@ -6,13 +6,14 @@ from datetime import datetime, timedelta
 
 import jwt
 from loguru import logger
-from sqlmodel import Session, select
-from fastapi import HTTPException, status
+from sqlmodel import Session, select, or_
+from fastapi import HTTPException, status, BackgroundTasks
 
 from app.core.config import settings
+from app.core.audit import _perform_audit_log
 from app.db.schema import (
-    TenantStatus, MemberStatus, ConnectionStatus,
-    Role, User, Tenant, TenantMember, TenantConnection, SupplierProfile,
+    TenantStatus, TenantType, MemberStatus, ConnectionStatus,
+    Role, User, Tenant, TenantMember, TenantConnection, SupplierProfile, AuditAction
 )
 from app.models.auth import Token, TokenData
 from app.models.user import UserCreate
@@ -107,9 +108,13 @@ class UserService:
 
         return active_membership.tenant_id
 
-    def create_user(self, user_in: UserCreate) -> User:
+    def create_user(
+        self,
+        user_in: UserCreate,
+        background_tasks: BackgroundTasks
+    ) -> User:
         """
-        Orchestrates Registration + Invitation Linking.
+        Orchestrates Registration + Invitation Linking + Audit Logging.
         """
         # 1. Check User Existence
         if self.get_user_by_email(user_in.email):
@@ -123,13 +128,13 @@ class UserService:
             raise ValueError(
                 "An organization with this company name already exists.")
 
-        # 3. Prepare Data
+        # 3. Resolve Owner Role
         hashed_pw = get_password_hash(user_in.password)
         owner_role_name = ""
 
-        if user_in.account_type == "brand":
+        if user_in.account_type == TenantType.BRAND:
             owner_role_name = "Brand Owner"
-        elif user_in.account_type == "supplier":
+        elif user_in.account_type == TenantType.SUPPLIER:
             owner_role_name = "Supplier Admin"
         else:
             raise ValueError(
@@ -141,11 +146,10 @@ class UserService:
         ).first()
 
         if not owner_role:
-            raise ValueError("System configuration error: Owner role missing.")
+            raise ValueError(
+                f"System configuration error: Role '{owner_role_name}' missing.")
 
         try:
-            # --- START ATOMIC TRANSACTION ---
-
             # A. Create User
             new_user = User(
                 email=user_in.email,
@@ -155,7 +159,7 @@ class UserService:
                 is_active=True
             )
             self.session.add(new_user)
-            self.session.flush()
+            self.session.flush()  # Get ID
 
             # B. Create Tenant
             base_slug = self._generate_slug(user_in.company_name)
@@ -169,7 +173,7 @@ class UserService:
                 location_country=user_in.location_country
             )
             self.session.add(new_tenant)
-            self.session.flush()  # Need ID for linking
+            self.session.flush()  # Get ID
 
             # C. Create Owner Membership
             membership = TenantMember(
@@ -180,47 +184,91 @@ class UserService:
             )
             self.session.add(membership)
 
-            # D. LINK PENDING B2B INVITATIONS (Updated for Schema)
-            # Scenario: A Brand invited this email to be a supplier.
-            # We must link the Connection AND the SupplierProfile.
+            # We log these now, effectively initializing the history of this new tenant
+            background_tasks.add_task(
+                _perform_audit_log,
+                tenant_id=new_tenant.id,
+                user_id=new_user.id,
+                entity_type="User",
+                entity_id=new_user.id,
+                action=AuditAction.CREATE,
+                changes={"email": new_user.email}
+            )
+            background_tasks.add_task(
+                _perform_audit_log,
+                tenant_id=new_tenant.id,
+                user_id=new_user.id,
+                entity_type="Tenant",
+                entity_id=new_tenant.id,
+                action=AuditAction.CREATE,
+                changes={"name": new_tenant.name, "type": new_tenant.type}
+            )
 
-            pending_invites = self.session.exec(
-                select(TenantConnection)
-                .where(TenantConnection.supplier_email_invite == user_in.email)
-                .where(TenantConnection.status == ConnectionStatus.PENDING)
+            # D. LINK PENDING INVITATIONS (Sync TenantConnection & SupplierProfile)
+
+            # Find Connections via Token OR Email
+            # We must look at TenantConnection table because SupplierProfile doesn't have the token/email fields for matching
+            conditions = [
+                (TenantConnection.invitation_email == user_in.email) &
+                (TenantConnection.status == ConnectionStatus.PENDING)
+            ]
+
+            if user_in.invitation_token:
+                conditions.append(
+                    (TenantConnection.invitation_token == user_in.invitation_token) &
+                    (TenantConnection.status == ConnectionStatus.PENDING)
+                )
+
+            pending_connections = self.session.exec(
+                select(TenantConnection).where(or_(*conditions))
             ).all()
 
-            for connection in pending_invites:
-                # 1. Link the Connection
-                connection.supplier_tenant_id = new_tenant.id
+            unique_connections = {
+                c.id: c for c in pending_connections}.values()
+
+            for connection in unique_connections:
+                # 1. Update TenantConnection (The Handshake)
+                # We do NOT change status to ACTIVE yet. Logic remains PENDING until accepted.
+                connection.target_tenant_id = new_tenant.id
                 self.session.add(connection)
 
-                # 2. Link the Shadow Profile (SupplierProfile)
-                # Your schema says SupplierProfile.connected_tenant_id is a DENORMALIZED field.
-                # We must update it here to maintain integrity.
-                if connection.supplier_profile_id:
-                    profile = self.session.get(
-                        SupplierProfile, connection.supplier_profile_id)
-                    if profile:
-                        profile.connected_tenant_id = new_tenant.id
-                        # Update metadata while we are at it
-                        if not profile.contact_email:
-                            profile.contact_email = new_user.email
-                        self.session.add(profile)
+                # 2. Update SupplierProfile (The Shadow Profile)
+                # Since Profile has the FK to Connection, we find the profile pointing to this connection
+                profile = self.session.exec(
+                    select(SupplierProfile).where(
+                        SupplierProfile.connection_id == connection.id)
+                ).first()
 
-                logger.info(
-                    f"Linked new Tenant {new_tenant.id} to Connection {connection.id}")
+                if profile:
+                    profile.supplier_tenant_id = new_tenant.id
+                    profile.slug = new_tenant.slug
+                    self.session.add(profile)
 
-            # --- COMMIT ---
+                    # Important: We log this on the Requester's timeline because their address book changed.
+                    background_tasks.add_task(
+                        _perform_audit_log,
+                        tenant_id=connection.requester_tenant_id,  # The Brand who invited
+                        # The User (You) who registered
+                        user_id=new_user.id,
+                        entity_type="SupplierProfile",
+                        entity_id=profile.id,
+                        action=AuditAction.UPDATE,
+                        changes={
+                            "note": "Supplier Registered and Linked",
+                            "linked_tenant_slug": new_tenant.slug,
+                            "previous_status": "Unregistered"
+                        }
+                    )
+
             self.session.commit()
             self.session.refresh(new_user)
 
-            logger.info(f"Registration successful for {new_user.email}")
             return new_user
 
         except Exception as e:
             self.session.rollback()
-            logger.error(f"Registration failed: {str(e)}")
+            # Log error properly
+            print(f"Registration Error: {e}")
             raise e
 
     def authenticate_user(self, email: str, password: str) -> Optional[User]:

@@ -101,24 +101,28 @@ GLOBAL_ROLES = {
 STANDARD_CERTIFICATES = [
     {
         "name": "Global Organic Textile Standard (GOTS) 7.0",
+        "code": "GOTS-V7",
         "issuer_authority": "Global Standard gGmbH",
         "category": CertificateCategory.ENVIRONMENTAL,
         "description": "The worldwide leading textile processing standard for organic fibres."
     },
     {
         "name": "OEKO-TEX® Standard 100",
+        "code": "OEKO-100",
         "issuer_authority": "OEKO-TEX Association",
         "category": CertificateCategory.CHEMICAL_SAFETY,
         "description": "Labels for textiles tested for harmful substances."
     },
     {
         "name": "SA8000 Social Accountability",
+        "code": "SA8000",
         "issuer_authority": "Social Accountability International",
         "category": CertificateCategory.SOCIAL,
         "description": "Leading social certification standard for factories and organizations."
     },
     {
         "name": "ISO 14001:2015",
+        "code": "ISO-14001",
         "issuer_authority": "ISO",
         "category": CertificateCategory.ENVIRONMENTAL,
         "description": "Criteria for an environmental management system."
@@ -236,7 +240,6 @@ def seed_roles(session: Session, perm_map: dict[str, Permission]):
     logger.info("--- Seeding Roles ---")
 
     for role_name, perm_keys in GLOBAL_ROLES.items():
-        # Look for global role (tenant_id is None)
         role = session.exec(select(Role).where(
             Role.name == role_name, Role.tenant_id == None)).first()
 
@@ -252,28 +255,37 @@ def seed_roles(session: Session, perm_map: dict[str, Permission]):
             RolePermissionLink.role_id == role.id)).all()
         existing_perm_ids = {link.permission_id for link in current_links}
 
-        target_perm_ids = {perm_map[k].id for k in perm_keys if k in perm_map}
+        for k in perm_keys:
+            if k not in perm_map:
+                logger.warning(
+                    f"⚠️ Permission key '{k}' found in Role '{role_name}' but not defined in SYSTEM_PERMISSIONS. Skipping.")
+                continue
 
-        for pid in target_perm_ids:
+            pid = perm_map[k].id
             if pid not in existing_perm_ids:
                 session.add(RolePermissionLink(
                     role_id=role.id, permission_id=pid))
-                logger.debug(f"  + Added perm ID {pid} to {role_name}")
+                logger.debug(f"  + Added perm '{k}' to {role_name}")
 
 
 def seed_certificates(session: Session):
     """Creates standard global certificate definitions."""
     logger.info("--- Seeding Certificates ---")
     for cert_data in STANDARD_CERTIFICATES:
+        # Check by CODE (More reliable than name for uniqueness)
         exists = session.exec(select(CertificateDefinition).where(
-            CertificateDefinition.name == cert_data["name"],
+            CertificateDefinition.code == cert_data["code"],
             CertificateDefinition.tenant_id == None
         )).first()
 
         if not exists:
             cert = CertificateDefinition(
                 tenant_id=None,  # Global
-                **cert_data
+                name=cert_data["name"],
+                code=cert_data["code"],  # <--- Ensuring code is passed
+                issuer_authority=cert_data["issuer_authority"],
+                category=cert_data["category"],
+                description=cert_data["description"]
             )
             session.add(cert)
             logger.info(f"Created Cert Definition: {cert_data['name']}")
