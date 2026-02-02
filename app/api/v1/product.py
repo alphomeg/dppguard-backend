@@ -11,7 +11,9 @@ from app.models.product import (
     ProductIdentityUpdate,
     ProductMediaAdd,
     ProductMediaRead,
-    ProductMediaReorder
+    ProductMediaReorder,
+    ProductReadDetailView,
+    ProductVersionGroup
 )
 
 router = APIRouter()
@@ -53,7 +55,7 @@ def create_product(
 
 @router.get(
     "/{product_id}",
-    response_model=ProductRead,
+    response_model=ProductReadDetailView,
     status_code=status.HTTP_200_OK,
     summary="Get Product Details",
     description="Get a specific product with its full media gallery and latest version info."
@@ -154,3 +156,23 @@ def reorder_media(
     service: ProductService = Depends(get_product_service)
 ):
     return service.reorder_media(current_user, product_id, order_list, background_tasks)
+
+
+# ==============================================================================
+# VERSION HISTORY
+# ==============================================================================
+
+
+@router.get(
+    "/{product_id}/versions",
+    response_model=List[ProductVersionGroup],
+    status_code=status.HTTP_200_OK,
+    summary="Get Version History",
+    description="Get all versions grouped by sequence with revisions. Returns hierarchical structure for frontend display."
+)
+def get_version_history(
+    product_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: ProductService = Depends(get_product_service)
+):
+    return service.get_version_history(current_user, product_id)

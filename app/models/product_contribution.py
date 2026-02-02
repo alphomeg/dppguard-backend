@@ -13,6 +13,10 @@ class MaterialInput(SQLModel):
     """
     Represents a single row in the Bill of Materials (BOM) input form.
     """
+    lineage_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="Include when editing existing material. Omit for new materials."
+    )
     name: str = Field(
         min_length=2,
         max_length=100,
@@ -43,6 +47,10 @@ class SubSupplierInput(SQLModel):
     """
     Represents a specific node in the supply chain (Tier 2/3).
     """
+    lineage_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="Include when editing existing supply node. Omit for new nodes."
+    )
     role: str = Field(
         min_length=2,
         max_length=100,
@@ -71,6 +79,10 @@ class CertificateInput(SQLModel):
     id: Optional[str] = Field(
         default=None,
         description="If editing, this is the existing ID. If new, leave null."
+    )
+    lineage_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="Include when editing existing certificate. Omit for new certificates."
     )
     certificate_type_id: uuid.UUID = Field(
         description="UUID of the standard certificate definition (e.g. GOTS, Oeko-Tex)."
@@ -272,6 +284,7 @@ class RequestReadList(SQLModel):
 
 class ProductMaterialRead(SQLModel):
     id: uuid.UUID
+    lineage_id: uuid.UUID
     material_name: str
     percentage: float
     origin_country: str
@@ -280,6 +293,7 @@ class ProductMaterialRead(SQLModel):
 
 class ProductSupplyNodeRead(SQLModel):
     id: uuid.UUID
+    lineage_id: uuid.UUID
     role: str
     company_name: str
     location_country: str
@@ -287,6 +301,7 @@ class ProductSupplyNodeRead(SQLModel):
 
 class ProductCertificateRead(SQLModel):
     id: uuid.UUID
+    lineage_id: uuid.UUID
     certificate_type_id: Optional[uuid.UUID]
     snapshot_name: str
     snapshot_issuer: str
@@ -346,3 +361,49 @@ class ProductCollaborationStatusRead(SQLModel):
 
     due_date: Optional[date] = None
     last_updated_at: datetime
+
+
+# ==========================================
+# COMPARISON MODELS
+# ==========================================
+
+
+class VersionComparisonMaterial(ProductMaterialRead):
+    pass  # Inherits lineage_id for matching
+
+
+class VersionComparisonSupply(ProductSupplyNodeRead):
+    pass  # Inherits lineage_id for matching
+
+
+class VersionComparisonImpact(SQLModel):
+    id: str = Field(description="Internal key for display logic")
+    label: str
+    val: str = Field(description="Formatted value with unit (e.g., '4.5 kg')")
+
+
+class VersionComparisonCertificate(ProductCertificateRead):
+    pass  # Inherits lineage_id for matching
+
+
+class VersionComparisonSnapshot(SQLModel):
+    """
+    A flattened view of a single version for side-by-side UI.
+    """
+    version_label: str
+    materials: List[VersionComparisonMaterial] = []
+    supply_chain: List[VersionComparisonSupply] = []
+    impact: List[VersionComparisonImpact] = []
+    certificates: List[VersionComparisonCertificate] = []
+
+
+class VersionComparisonResponse(SQLModel):
+    """
+    The wrapper for the comparison view.
+    """
+    previous: Optional[VersionComparisonSnapshot] = Field(
+        default=None, description="The baseline version (or older version)."
+    )
+    current: VersionComparisonSnapshot = Field(
+        description="The active version being edited/reviewed."
+    )

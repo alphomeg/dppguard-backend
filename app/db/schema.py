@@ -146,6 +146,7 @@ class ProductVersionStatus(str, Enum):
     APPROVED = "approved"
     # Brand requested changes. System must clone this to a new draft.
     REJECTED = "rejected"
+    CANCELLED = "cancelled"  # Workflow aborted by Brand
 
 
 class VisibilityScope(str, Enum):
@@ -1110,6 +1111,11 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
     version_name: str = Field(
         description="Label for this batch (e.g., 'Lot 405').")
 
+    revision: int = Field(
+        default=0,
+        description="Incrementing number for revisions within a major version sequence (e.g. v1.0, v1.1)."
+    )
+
     change_summary: Optional[str] = Field(
         default=None,
         description="The 'Commit Message' for this version. Mandatory if this is a clone/revision of a previous rejected version. Example: 'Corrected Polyester % per brand audit.'"
@@ -1192,6 +1198,12 @@ class ProductVersionCertificate(TimestampMixin, SQLModel, table=True):
         default=None,
         foreign_key="supplierartifact.id",
         description="Link to the original library record. Used only to track which folder/file the supplier selected. If the supplier deletes the original, this link breaks, but the data below persists."
+    )
+
+    lineage_id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        index=True,
+        description="Immutable identifier for tracking this certificate across all versions/revisions."
     )
 
     # =========================================================
@@ -1351,6 +1363,12 @@ class ProductVersionMaterial(TimestampMixin, SQLModel, table=True):
         description="Reference to the original library item (for lineage), if it exists."
     )
 
+    lineage_id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        index=True,
+        description="Immutable identifier for tracking this material across all versions/revisions. Generated once, preserved through clones and updates."
+    )
+
     # Snapshot Data (Stored as text/float, not lookups)
     material_name: str = Field(
         description="Name of the material at time of use.")
@@ -1386,6 +1404,12 @@ class ProductVersionSupplyNode(TimestampMixin, SQLModel, table=True):
     """
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     version_id: uuid.UUID = Field(foreign_key="productversion.id")
+
+    lineage_id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        index=True,
+        description="Immutable identifier for tracking this supply node across all versions/revisions."
+    )
 
     role: str = Field(description="Function (e.g. 'Spinner', 'Dyer').")
     company_name: str = Field(

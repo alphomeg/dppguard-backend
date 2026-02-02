@@ -8,7 +8,8 @@ from app.services.tenant_connection import TenantConnectionService
 from app.models.tenant_connection import (
     InviteDetails,
     PublicTenantRead,
-    ConnectionReinvite
+    ConnectionReinvite,
+    TenantConnectionRequestRespond
 )
 from app.models.supplier_profile import SupplierProfileRead
 
@@ -45,7 +46,7 @@ def verify_invitation(
 )
 def respond_to_connection_request(
     connection_id: uuid.UUID,
-    accept: bool,
+    data: TenantConnectionRequestRespond,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     service: TenantConnectionService = Depends(get_tenant_connection_service)
@@ -54,7 +55,7 @@ def respond_to_connection_request(
     Called by the Target (e.g., a Supplier) to accept/reject a Brand's request.
     Global scope: Handles any incoming B2B handshake.
     """
-    return service.respond_to_request(current_user, connection_id, accept, background_tasks)
+    return service.respond_to_request(current_user, connection_id, data.accept, background_tasks)
 
 
 # ==============================================================================

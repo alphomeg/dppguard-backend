@@ -189,7 +189,7 @@ class TenantConnectionService:
 
         conn = profile.connection
 
-        if not conn.status in [ConnectionStatus.PENDING, ConnectionStatus.ReJECTED]:
+        if not conn.status in [ConnectionStatus.PENDING, ConnectionStatus.REJECTED]:
             raise HTTPException(
                 status_code=400, detail="Invalid supplier connection status.")
 

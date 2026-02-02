@@ -1,6 +1,6 @@
 import uuid
 import json
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, status, BackgroundTasks, Body, Form, File, UploadFile, HTTPException
 
 from app.db.schema import User
@@ -15,7 +15,9 @@ from app.models.product_contribution import (
     ProductVersionDetailRead,
     ProductCollaborationStatusRead,
     CancelRequestPayload,
-    ReviewPayload
+    CancelRequestPayload,
+    ReviewPayload,
+    VersionComparisonResponse
 )
 
 router = APIRouter()
@@ -204,3 +206,21 @@ def review_product_request(
         get_product_contribution_service)
 ):
     return service.review_submission(current_user, product_id, request_id, payload.action, payload.comment)
+
+
+@router.get(
+    "/{product_id}/requests/{request_id}/compare",
+    response_model=VersionComparisonResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Compare Versions",
+    description="Compare the current active version of a request against a previous version (or none)."
+)
+def compare_request_versions(
+    product_id: uuid.UUID,
+    request_id: uuid.UUID,
+    compare_to: Optional[uuid.UUID] = None,
+    current_user: User = Depends(get_current_user),
+    service: ProductContributionService = Depends(
+        get_product_contribution_service)
+):
+    return service.compare_request_versions(current_user, product_id, request_id, compare_to)

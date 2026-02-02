@@ -202,7 +202,7 @@ class SupplierProfileService:
                 changes=data.model_dump(mode='json')
             )
 
-            return self._build_read_response(profile, conn, target_tenant_slug)
+            return self._build_read_response(profile)
 
         except Exception as e:
             self.session.rollback()
@@ -262,7 +262,7 @@ class SupplierProfileService:
             changes=changes
         )
 
-        return self._build_read_response(profile, profile.connection)
+        return self._build_read_response(profile)
 
     # ==========================================================================
     # ACTION: DISCONNECT (Soft Delete / Archive)

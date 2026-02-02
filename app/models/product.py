@@ -2,7 +2,8 @@ import uuid
 from typing import List, Optional
 from datetime import datetime
 from sqlmodel import SQLModel, Field
-from app.db.schema import ProductLifecycleStatus, MediaType
+from app.db.schema import ProductLifecycleStatus, MediaType, ProductVersionStatus
+from app.models.supplier_profile import SupplierProfileRead
 
 # ==========================================
 # MEDIA MODELS
@@ -251,4 +252,85 @@ class ProductRead(SQLModel):
     )
     updated_at: datetime = Field(
         description="Last update timestamp."
+    )
+
+
+class ProductVersionSummary(SQLModel):
+    """
+    Brief summary of a specific Product Version/Revision.
+    Frontend uses this to build version hierarchy and comparison pickers.
+    """
+    id: uuid.UUID = Field(
+        description="Unique identifier for this specific version snapshot."
+    )
+    version_sequence: int = Field(
+        description="Major version number (e.g., 1, 2, 3)."
+    )
+    revision: int = Field(
+        description="Revision number within the version sequence (e.g., 0, 1, 2)."
+    )
+    version_name: str = Field(
+        description="Display name (e.g., 'Spring 2025 Batch', 'Lot 405')."
+    )
+    status: ProductVersionStatus = Field(
+        default=ProductVersionStatus.DRAFT,
+        description="The lifecycle of this data submission (Draft -> Submitted -> Approved)."
+    )
+    created_at: datetime = Field(
+        description="When this version/revision was created."
+    )
+    updated_at: datetime = Field(
+        description="Last modification timestamp."
+    )
+
+    # Workflow / Collaboration details
+    supplier_name: Optional[str] = Field(
+        default=None,
+        description="Name of the supplier assigned to this version."
+    )
+    supplier_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="ID of the supplier profile (from address book)."
+    )
+    
+    # Comparison Helper
+    is_latest: bool = Field(
+        default=False,
+        description="True if this is the absolute latest version/revision."
+    )
+
+
+class ProductVersionGroup(SQLModel):
+    """
+    Groups revisions under a single version sequence for hierarchical display.
+    Frontend uses this to show: v1 (APPROVED) > [v1.0 REJECTED, v1.1 APPROVED]
+    """
+    version_sequence: int = Field(
+        description="The major version number (e.g., 1, 2, 3)."
+    )
+    version_name: str = Field(
+        description="Name of the latest revision in this sequence."
+    )
+    latest_status: ProductVersionStatus = Field(
+        description="Status of the most recent revision in this sequence."
+    )
+    latest_revision: int = Field(
+        description="Highest revision number in this sequence."
+    )
+    revisions: List[ProductVersionSummary] = Field(
+        default=[],
+        description="All revisions within this version, sorted by revision DESC."
+    )
+
+
+class ProductReadDetailView(ProductRead):
+    """
+    Detailed response model for a Product.
+
+    Inherits all Identity fields from ProductRead.
+    Includes a list of all historical versions with sequence and status details.
+    """
+    versions: List[ProductVersionSummary] = Field(
+        default=[],
+        description="List of all versions (drafts, history, and active) associated with this product."
     )

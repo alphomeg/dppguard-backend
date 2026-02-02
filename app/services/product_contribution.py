@@ -23,7 +23,11 @@ from app.models.product_contribution import (
     ProductAssignmentRequest,
     ProductVersionDetailRead, ProductMaterialRead,
     ProductSupplyNodeRead, ProductCertificateRead,
-    ProductCollaborationStatusRead
+    ProductSupplyNodeRead, ProductCertificateRead,
+    ProductCollaborationStatusRead,
+    VersionComparisonResponse, VersionComparisonSnapshot,
+    VersionComparisonMaterial, VersionComparisonSupply,
+    VersionComparisonImpact, VersionComparisonCertificate
 )
 from app.core.audit import _perform_audit_log
 from app.utils.file_storage import save_upload_file
@@ -71,18 +75,24 @@ class ProductContributionService:
             )
         return tenant
 
-    def _deep_clone_version(self, source_version: ProductVersion, new_version_sequence: int, new_status: ProductVersionStatus) -> ProductVersion:
+    def _deep_clone_version(self, source_version: ProductVersion, new_version_sequence: int, new_status: ProductVersionStatus, new_revision: int = 0) -> ProductVersion:
         """
         Internal Helper: Creates a deep copy of a ProductVersion.
         Clones: Metadata, Materials, Supply Chain, and Certificate Links.
         Does NOT clone the actual SupplierArtifacts (files), just the references to them.
         """
+        # Logic: If major version change, append Copy. If revision, keep name.
+        final_name = source_version.version_name
+        if new_version_sequence != source_version.version_sequence:
+            final_name = f"{source_version.version_name} (Copy)"
+
         # 1. Clone Shell
         new_version = ProductVersion(
             product_id=source_version.product_id,
             supplier_tenant_id=source_version.supplier_tenant_id,
             version_sequence=new_version_sequence,
-            version_name=f"{source_version.version_name} (Copy)",
+            revision=new_revision,
+            version_name=final_name,
             status=new_status,
             manufacturing_country=source_version.manufacturing_country,
             mass_kg=source_version.mass_kg,
@@ -97,6 +107,7 @@ class ProductContributionService:
         for m in source_version.materials:
             self.session.add(ProductVersionMaterial(
                 version_id=new_version.id,
+                lineage_id=m.lineage_id,  # PRESERVE lineage
                 source_material_definition_id=m.source_material_definition_id,  # Keep lineage
                 material_name=m.material_name,
                 percentage=m.percentage,
@@ -109,6 +120,7 @@ class ProductContributionService:
         for s in source_version.supply_chain:
             self.session.add(ProductVersionSupplyNode(
                 version_id=new_version.id,
+                lineage_id=s.lineage_id,  # PRESERVE lineage
                 role=s.role,
                 company_name=s.company_name,
                 location_country=s.location_country
@@ -119,6 +131,7 @@ class ProductContributionService:
         for c in source_version.certificates:
             self.session.add(ProductVersionCertificate(
                 version_id=new_version.id,
+                lineage_id=c.lineage_id,  # PRESERVE lineage
                 certificate_type_id=c.certificate_type_id,
                 source_artifact_id=c.source_artifact_id,  # Link to same vault item
                 file_url=c.file_url,                     # Same URL
@@ -238,6 +251,7 @@ class ProductContributionService:
 
             materials=[
                 MaterialInput(
+                    lineage_id=m.lineage_id,
                     name=m.material_name,
                     percentage=m.percentage,
                     origin_country=m.origin_country,
@@ -247,6 +261,7 @@ class ProductContributionService:
 
             sub_suppliers=[
                 SubSupplierInput(
+                    lineage_id=s.lineage_id,
                     role=s.role,
                     name=s.company_name,
                     country=s.location_country
@@ -256,6 +271,7 @@ class ProductContributionService:
             certificates=[
                 CertificateInput(
                     id=str(c.id),  # Return ID of the link, not the artifact
+                    lineage_id=c.lineage_id,
                     certificate_type_id=c.certificate_type_id,
                     name=c.snapshot_name,
                     expiry_date=c.valid_until,
@@ -381,6 +397,14 @@ class ProductContributionService:
 
         version = self.session.get(ProductVersion, req.current_version_id)
 
+        # 2. NEW: Data Integrity Guard (Defense in Depth)
+        # Even if the request says 'In Progress', if the version is locked/cancelled, we MUST NOT write.
+        if version.status != ProductVersionStatus.DRAFT:
+            raise HTTPException(
+                status_code=409,  # Conflict
+                detail=f"Cannot edit data: The technical version is locked ({version.status.value})."
+            )
+
         # 1. Update Scalars
         if data.manufacturing_country is not None:
             version.manufacturing_country = data.manufacturing_country
@@ -391,36 +415,68 @@ class ProductContributionService:
         if data.total_water_usage is not None:
             version.total_water_usage = data.total_water_usage
 
-        # 2. Update Materials (Full Replace Strategy)
+        # 2. Update Materials (Full Replace Strategy with Lineage Tracking)
+        # Build map of existing lineage IDs for validation
+        existing_material_lineages = {m.lineage_id for m in version.materials}
+
         for m in list(version.materials):
             self.session.delete(m)
         version.materials = []  # Clear logic list
 
         for m_in in data.materials:
+            # Handle lineage_id: validate if provided, generate if not
+            if m_in.lineage_id:
+                if m_in.lineage_id not in existing_material_lineages:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid material lineage_id: {m_in.lineage_id} does not exist in current version"
+                    )
+                final_lineage_id = m_in.lineage_id  # Preserve
+            else:
+                final_lineage_id = uuid.uuid4()  # Generate new for new items
+
             self.session.add(ProductVersionMaterial(
                 version_id=version.id,
+                lineage_id=final_lineage_id,
                 material_name=m_in.name,
                 percentage=m_in.percentage,
                 origin_country=m_in.origin_country,
                 transport_method=m_in.transport_method
             ))
 
-        # 3. Update Supply Chain (Full Replace Strategy)
+        # 3. Update Supply Chain (Full Replace Strategy with Lineage Tracking)
+        existing_supply_lineages = {s.lineage_id for s in version.supply_chain}
+
         for s in list(version.supply_chain):
             self.session.delete(s)
         version.supply_chain = []
 
         for s_in in data.sub_suppliers:
+            # Handle lineage_id
+            if s_in.lineage_id:
+                if s_in.lineage_id not in existing_supply_lineages:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid supply node lineage_id: {s_in.lineage_id} does not exist in current version"
+                    )
+                final_lineage_id = s_in.lineage_id
+            else:
+                final_lineage_id = uuid.uuid4()
+
             self.session.add(ProductVersionSupplyNode(
                 version_id=version.id,
+                lineage_id=final_lineage_id,
                 role=s_in.role,
                 company_name=s_in.name,
                 location_country=s_in.country
             ))
 
-        # 4. Handle Certificates
+        # 4. Handle Certificates (with Lineage Tracking)
         # Map uploaded files by their internal ID from the frontend (temp_file_id)
         file_map = {f.filename: f for f in files}
+
+        # Build map of existing lineage IDs for validation
+        existing_cert_lineages = {c.lineage_id for c in version.certificates}
 
         # Clear existing certificate links
         # (We recreate them to ensure the list matches the frontend state exactly)
@@ -429,6 +485,17 @@ class ProductContributionService:
         version.certificates = []
 
         for cert_input in data.certificates:
+            # Handle lineage_id
+            if cert_input.lineage_id:
+                if cert_input.lineage_id not in existing_cert_lineages:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid certificate lineage_id: {cert_input.lineage_id} does not exist in current version"
+                    )
+                final_lineage_id = cert_input.lineage_id
+            else:
+                final_lineage_id = uuid.uuid4()
+
             final_file_url = cert_input.file_url
             artifact_id = None
             detected_content_type = "application/octet-stream"
@@ -464,12 +531,6 @@ class ProductContributionService:
 
             # CASE B: EXISTING FILE (NO NEW UPLOAD)
             elif final_file_url:
-                # We assume the user didn't change the file, just maybe the metadata.
-                # If the Frontend sent us the 'id' (ProductVersionCertificate ID),
-                # we could ideally look up the old record to find the 'source_artifact_id'.
-                # For simplicity in 'Full Replace', we might lose the artifact link if not careful.
-                # *Improvement*: You can query the deleted objects to recover the artifact_id if needed.
-
                 # Guess Type for Snapshot
                 mime, _ = mimetypes.guess_type(final_file_url)
                 if mime:
@@ -479,6 +540,7 @@ class ProductContributionService:
             if final_file_url:
                 new_link = ProductVersionCertificate(
                     version_id=version.id,
+                    lineage_id=final_lineage_id,
                     certificate_type_id=cert_input.certificate_type_id,
                     # Might be None if existing and we didn't recover it, but URL is safe
                     source_artifact_id=artifact_id,
@@ -534,30 +596,32 @@ class ProductContributionService:
     ):
         """
         Assigns a Product to a Supplier.
-        Handles: First assignment, Re-assignment, and New Version creation.
+        STRATEGY: 
+        1. Always create a NEW version (Sequence + 1).
+        2. Source data MUST come from the latest APPROVED version.
+        3. If no APPROVED version exists (e.g. first run was cancelled), start FRESH/EMPTY.
         """
         brand = self._get_brand_context(user)
 
-        # 1. Fetch Product
+        # 1. Fetch Context
         product = self.session.get(Product, product_id)
         if not product or product.tenant_id != brand.id:
             raise HTTPException(status_code=404, detail="Product not found.")
 
-        # 2. Verify Connection via Profile
         profile = self.session.get(SupplierProfile, data.supplier_profile_id)
         if not profile or profile.tenant_id != brand.id:
             raise HTTPException(
                 status_code=404, detail="Supplier profile not found.")
 
         connection = profile.connection
-        if not connection or connection.status != ConnectionStatus.ACTIVE or not connection.supplier_tenant_id:
+        if not connection or connection.status != ConnectionStatus.ACTIVE or not connection.target_tenant_id:
             raise HTTPException(
-                status_code=400, detail="Supplier connection is not active or fully onboarded.")
+                status_code=400, detail="Supplier connection is not active.")
 
-        real_supplier_id = connection.supplier_tenant_id
+        real_supplier_id = connection.target_tenant_id
 
-        # 3. Determine Version Strategy
-        existing_versions = self.session.exec(
+        # 2. Analyze Existing Versions
+        all_versions = self.session.exec(
             select(ProductVersion)
             .where(ProductVersion.product_id == product.id)
             .order_by(ProductVersion.version_sequence.desc())
@@ -565,66 +629,77 @@ class ProductContributionService:
 
         target_version = None
 
-        if not existing_versions:
-            # SCENARIO A: First Assignment (Create v1)
-            v_name = product.pending_version_name or "Initial Version"
+        # Determine the next sequence number
+        if not all_versions:
+            next_sequence = 1
+        else:
+            # Always increment based on the absolute latest (even if it was cancelled)
+            # This preserves the unique history of the database rows.
+            latest_any_status = all_versions[0]
+            next_sequence = latest_any_status.version_sequence + 1
+
+            # BLOCKING CHECK: Is the HEAD version currently active?
+            # We can't start a new workflow if the previous one is still pending.
+            active_statuses = [
+                RequestStatus.SENT, RequestStatus.ACCEPTED,
+                RequestStatus.IN_PROGRESS, RequestStatus.CHANGES_REQUESTED,
+                RequestStatus.SUBMITTED
+            ]
+
+            active_req = self.session.exec(
+                select(ProductContributionRequest)
+                .where(ProductContributionRequest.current_version_id == latest_any_status.id)
+                .where(ProductContributionRequest.status.in_(active_statuses))
+            ).first()
+
+            if active_req:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot assign: The latest version has an active request ({active_req.status.value}). Please Cancel or Review it first."
+                )
+
+        # 3. Find the 'Golden Master' (Latest APPROVED version)
+        # We search through history to find the last known good state.
+        latest_approved = next(
+            (v for v in all_versions if v.status == ProductVersionStatus.APPROVED), None)
+
+        if latest_approved:
+            # SCENARIO A: We have a valid history. CLONE it.
+            # This ensures we don't propagate 'Rejected' or 'Cancelled' bad data.
+            target_version = self._deep_clone_version(
+                source_version=latest_approved,
+                new_version_sequence=next_sequence,
+                new_status=ProductVersionStatus.DRAFT,
+                new_revision=0  # Reset revision for new major version
+            )
+        else:
+            # SCENARIO B: No Approved history exists.
+            # This handles:
+            # 1. Very first assignment (all_versions is empty)
+            # 2. Previous attempt was Cancelled/Rejected before Approval (all_versions exists, but none Approved)
+
+            # We create a FRESH, EMPTY version.
+            v_name = product.pending_version_name or f"Version {next_sequence}"
+
             target_version = ProductVersion(
                 product_id=product.id,
                 supplier_tenant_id=real_supplier_id,
-                version_sequence=1,
+                version_sequence=next_sequence,
+                revision=0,
                 version_name=v_name,
                 status=ProductVersionStatus.DRAFT
+                # Note: No data fields copied. Supplier starts from scratch.
             )
-            self.session.add(target_version)
-            self.session.flush()
 
-            # Clear pending name from shell
-            product.pending_version_name = None
-            self.session.add(product)
+        # 4. Finalize Target Version Setup
+        # (Deep clone helper might not set these if we used it, or fresh constr set them above)
+        # We explicitly enforce them here to be safe.
+        target_version.product_id = product.id
+        target_version.supplier_tenant_id = real_supplier_id
+        target_version.version_sequence = next_sequence
 
-        else:
-            latest = existing_versions[0]
-
-            if latest.status in [ProductVersionStatus.APPROVED, ProductVersionStatus.SUBMITTED]:
-                # SCENARIO B: Locked -> Clone new Draft (v2, v3...)
-                # DEEP CLONE so supplier doesn't start from scratch
-                target_version = self._deep_clone_version(
-                    source_version=latest,
-                    new_version_sequence=latest.version_sequence + 1,
-                    new_status=ProductVersionStatus.DRAFT
-                )
-                # Assign to potentially new supplier
-                target_version.supplier_tenant_id = real_supplier_id
-                self.session.add(target_version)
-                self.session.flush()
-
-            else:
-                # SCENARIO C: Existing Draft -> Reuse
-                # If re-assigning to a different supplier, update ownership
-                if latest.supplier_tenant_id != real_supplier_id:
-                    latest.supplier_tenant_id = real_supplier_id
-                    self.session.add(latest)
-
-                target_version = latest
-
-        # 4. Check for Duplicate Active Requests
-        active_statuses = [
-            RequestStatus.SENT, RequestStatus.ACCEPTED,
-            RequestStatus.IN_PROGRESS, RequestStatus.CHANGES_REQUESTED,
-            RequestStatus.SUBMITTED
-        ]
-
-        existing_req = self.session.exec(
-            select(ProductContributionRequest)
-            .where(ProductContributionRequest.current_version_id == target_version.id)
-            .where(ProductContributionRequest.status.in_(active_statuses))
-        ).first()
-
-        if existing_req:
-            raise HTTPException(
-                status_code=400,
-                detail=f"An active request ({existing_req.status}) already exists for this version."
-            )
+        self.session.add(target_version)
+        self.session.flush()
 
         # 5. Create Request
         request = ProductContributionRequest(
@@ -639,7 +714,7 @@ class ProductContributionService:
         )
         self.session.add(request)
 
-        # Add Note as Comment
+        # 6. Add Note
         if data.request_note:
             self.session.add(CollaborationComment(
                 request_id=request.id,
@@ -681,6 +756,7 @@ class ProductContributionService:
         statement = (
             select(ProductVersion)
             .where(ProductVersion.product_id == product_id)
+            .where(ProductVersion.status == ProductVersionStatus.APPROVED)
             .order_by(ProductVersion.version_sequence.desc())
             .options(
                 selectinload(ProductVersion.materials),
@@ -743,10 +819,14 @@ class ProductContributionService:
         if not product or product.tenant_id != brand.id:
             raise HTTPException(status_code=404, detail="Product not found.")
 
+        # 1. Fetch Latest Version (Sort by Sequence AND Revision)
         version = self.session.exec(
             select(ProductVersion)
             .where(ProductVersion.product_id == product_id)
-            .order_by(ProductVersion.version_sequence.desc())
+            .order_by(
+                ProductVersion.version_sequence.desc(),
+                ProductVersion.revision.desc()
+            )
         ).first()
 
         if not version:
@@ -759,7 +839,7 @@ class ProductContributionService:
                 last_updated_at=product.updated_at
             )
 
-        # Get latest request associated with this version
+        # 2. Get latest request associated with this specific version snapshot
         request = self.session.exec(
             select(ProductContributionRequest)
             .where(ProductContributionRequest.current_version_id == version.id)
@@ -770,31 +850,48 @@ class ProductContributionService:
         supplier_name = None
         supplier_country = None
         supplier_profile_id = None
+        due_date = None
+        req_status = None
+        req_id = None
+        req_updated_at = None
 
         if request:
-            # Resolve Supplier Info
-            supplier = self.session.get(Tenant, request.supplier_tenant_id)
-            if supplier:
-                supplier_name = supplier.name
-                supplier_country = supplier.location_country
+            req_id = request.id
+            req_status = request.status
+            due_date = request.due_date
+            req_updated_at = request.updated_at
 
-            # Resolve Connection Profile Info
-            connection = self.session.get(
-                TenantConnection, request.connection_id)
-            if connection:
-                supplier_profile_id = connection.supplier_profile_id
+            # Resolve Supplier Info via Profile (Preferred) or Tenant
+            if request.connection_id:
+                profile = self.session.exec(
+                    select(SupplierProfile)
+                    .where(SupplierProfile.connection_id == request.connection_id)
+                    .where(SupplierProfile.tenant_id == brand.id)
+                ).first()
+
+                if profile:
+                    supplier_profile_id = profile.id
+                    supplier_name = profile.name  # Brand's alias
+                    supplier_country = profile.location_country
+
+            # Fallback to raw tenant if no profile (shouldn't happen in stricter flows but safe)
+            if not supplier_name:
+                supplier = self.session.get(Tenant, request.supplier_tenant_id)
+                if supplier:
+                    supplier_name = supplier.name
+                    supplier_country = supplier.location_country
 
         return ProductCollaborationStatusRead(
-            active_request_id=request.id if request else None,
+            active_request_id=req_id,
             product_id=product.id,
             latest_version_id=version.id,
-            request_status=request.status if request else None,
+            request_status=req_status,
             version_status=version.status,
             assigned_supplier_name=supplier_name,
             assigned_supplier_profile_id=supplier_profile_id,
             supplier_country=supplier_country,
-            due_date=request.due_date if request else None,
-            last_updated_at=request.updated_at if request else version.updated_at
+            due_date=due_date,
+            last_updated_at=req_updated_at if req_updated_at else version.updated_at
         )
 
     def cancel_request(self, user: User, product_id: uuid.UUID, request_id: uuid.UUID, reason: str):
@@ -804,12 +901,39 @@ class ProductContributionService:
         if not request or request.brand_tenant_id != brand.id:
             raise HTTPException(status_code=404, detail="Request not found.")
 
-        if request.status in [RequestStatus.COMPLETED, RequestStatus.SUBMITTED, RequestStatus.CANCELLED]:
+        # 1. STRICT REQUEST GUARD
+        # We include SUBMITTED here. If it's submitted, Brand must Review, not Cancel.
+        if request.status in [RequestStatus.SUBMITTED, RequestStatus.COMPLETED, RequestStatus.CANCELLED]:
             raise HTTPException(
-                status_code=400, detail="Cannot cancel request in current status.")
+                status_code=400,
+                detail=f"Cannot cancel request. Current status is '{request.status.value}'. If Submitted, please Review instead."
+            )
 
+        # 2. STRICT VERSION GUARD
+        # Fetch the version this request is pointing to
+        version = self.session.get(ProductVersion, request.current_version_id)
+        if not version:
+            raise HTTPException(
+                status_code=404, detail="Associated product version not found.")
+
+        # Detect Data Conflict: Request says it's editable, but Version says it's locked.
+        if version.status in [ProductVersionStatus.SUBMITTED, ProductVersionStatus.APPROVED]:
+            raise HTTPException(
+                status_code=409,  # Conflict
+                detail=f"Data Integrity Error: The request is '{request.status.value}' but the technical data is already '{version.status.value}'. Please refresh or contact support."
+            )
+
+        # 3. EXECUTE CANCELLATION
         request.status = RequestStatus.CANCELLED
 
+        # 4. INVALIDATE VERSION
+        # If it was Draft (Work in progress) or Rejected (Supplier declined),
+        # we mark it Cancelled to indicate this specific snapshot is dead.
+        if version.status in [ProductVersionStatus.DRAFT, ProductVersionStatus.REJECTED]:
+            version.status = ProductVersionStatus.CANCELLED
+            self.session.add(version)
+
+        # 5. Add Comment/Audit
         self.session.add(CollaborationComment(
             request_id=request.id,
             author_user_id=user.id,
@@ -819,9 +943,10 @@ class ProductContributionService:
 
         self.session.add(request)
         self.session.commit()
-        return {"message": "Request cancelled"}
 
-    def review_submission(self, user: User, product_id: uuid.UUID, request_id: uuid.UUID, action: str, comment_text: Optional[str] = None):
+        return {"message": "Request cancelled successfully."}
+
+    def review_submission(self, user: User, product_id: uuid.UUID, request_id: uuid.UUID, action: str, comment: Optional[str] = None):
         """
         Brand Action: Approve or Request Changes.
         """
@@ -831,30 +956,162 @@ class ProductContributionService:
         if not request or request.brand_tenant_id != brand.id:
             raise HTTPException(status_code=404, detail="Request not found.")
 
+        # Determine Version
         version = self.session.get(ProductVersion, request.current_version_id)
 
-        if comment_text:
-            self.session.add(CollaborationComment(
-                request_id=request.id,
-                author_user_id=user.id,
-                body=comment_text,
-                is_rejection_reason=(action == 'request_changes')
-            ))
-
-        if action == 'approve':
+        if action == "approve":
             request.status = RequestStatus.COMPLETED
             version.status = ProductVersionStatus.APPROVED
 
-        elif action == 'request_changes':
+            # Update Product Updated At
+            if version.product_id:
+                product = self.session.get(Product, version.product_id)
+                product.updated_at = datetime.now(timezone.utc)
+                self.session.add(product)
+
+        elif action == "request_changes":
             request.status = RequestStatus.CHANGES_REQUESTED
-            # Unlock version for Supplier
-            version.status = ProductVersionStatus.DRAFT
+            version.status = ProductVersionStatus.REJECTED  # Mark old as Rejected
+
+            # Create New Revision (Clone)
+            new_draft = self._deep_clone_version(
+                source_version=version,
+                new_version_sequence=version.version_sequence,
+                new_status=ProductVersionStatus.DRAFT,
+                new_revision=version.revision + 1
+            )
+
+            # Switch Request to point to new Draft
+            request.current_version_id = new_draft.id
+            self.session.add(new_draft)
 
         else:
             raise HTTPException(status_code=400, detail="Invalid action.")
+
+        # Add Comment
+        if comment:
+            self.session.add(CollaborationComment(
+                request_id=request.id,
+                author_user_id=user.id,
+                body=comment,
+                is_rejection_reason=(action == "request_changes")
+            ))
 
         self.session.add(request)
         self.session.add(version)
         self.session.commit()
 
         return {"message": f"Submission {action}d successfully."}
+
+    def _map_version_to_snapshot(self, version: ProductVersion) -> VersionComparisonSnapshot:
+        """
+        Helper: Flattens a ProductVersion into a Comparison Snapshot.
+        """
+        if not version:
+            return None
+
+        # IMPACT
+        impacts = []
+        if version.total_carbon_footprint:
+            impacts.append(VersionComparisonImpact(
+                id="carbon", label="Carbon Footprint", val=f"{version.total_carbon_footprint} kg CO2e"
+            ))
+        if version.total_water_usage:
+            impacts.append(VersionComparisonImpact(
+                id="water", label="Water Usage", val=f"{version.total_water_usage} L"
+            ))
+        if version.total_energy_mj:
+            impacts.append(VersionComparisonImpact(
+                id="energy", label="Energy Usage", val=f"{version.total_energy_mj} MJ"
+            ))
+        if version.mass_kg:
+            impacts.append(VersionComparisonImpact(
+                id="mass", label="Net Weight", val=f"{version.mass_kg} kg"
+            ))
+
+        return VersionComparisonSnapshot(
+            version_label=f"{version.version_name} ({version.status.value})",
+            materials=[
+                VersionComparisonMaterial(
+                    id=m.id,
+                    lineage_id=m.lineage_id,
+                    material_name=m.material_name,
+                    percentage=m.percentage,
+                    origin_country=m.origin_country,
+                    transport_method=m.transport_method
+                ) for m in version.materials
+            ],
+            supply_chain=[
+                VersionComparisonSupply(
+                    id=s.id,
+                    lineage_id=s.lineage_id,
+                    role=s.role,
+                    company_name=s.company_name,
+                    location_country=s.location_country
+                ) for s in version.supply_chain
+            ],
+            impact=impacts,
+            certificates=[
+                VersionComparisonCertificate(
+                    id=c.id,
+                    lineage_id=c.lineage_id,
+                    certificate_type_id=c.certificate_type_id,
+                    snapshot_name=c.snapshot_name,
+                    snapshot_issuer=c.snapshot_issuer,
+                    valid_until=c.valid_until,
+                    file_url=c.file_url,
+                    file_type=c.file_type
+                ) for c in version.certificates
+            ]
+        )
+
+    def compare_request_versions(
+        self,
+        user: User,
+        product_id: uuid.UUID,
+        request_id: uuid.UUID,
+        compare_to: Optional[uuid.UUID] = None
+    ) -> VersionComparisonResponse:
+        """
+        Compares the request's current version against a previous version.
+        """
+        # 1. Validation
+        brand = self._get_brand_context(user)
+        req = self.session.get(ProductContributionRequest, request_id)
+        if not req or req.brand_tenant_id != brand.id:
+            raise HTTPException(status_code=404, detail="Request not found.")
+
+        # 2. Fetch Current Version (Eager Load everything)
+        current_v = self.session.exec(
+            select(ProductVersion)
+            .where(ProductVersion.id == req.current_version_id)
+            .options(
+                selectinload(ProductVersion.materials),
+                selectinload(ProductVersion.supply_chain),
+                selectinload(ProductVersion.certificates)
+            )
+        ).first()
+
+        if not current_v:
+            raise HTTPException(
+                status_code=404, detail="Current version not found.")
+
+        # 3. Fetch Previous Version
+        previous_v = None
+        if compare_to:
+            previous_v = self.session.exec(
+                select(ProductVersion)
+                .where(ProductVersion.id == compare_to)
+                .options(
+                    selectinload(ProductVersion.materials),
+                    selectinload(ProductVersion.supply_chain),
+                    selectinload(ProductVersion.certificates)
+                )
+            ).first()
+
+        # 4. Map Response
+        return VersionComparisonResponse(
+            current=self._map_version_to_snapshot(current_v),
+            previous=self._map_version_to_snapshot(
+                previous_v) if previous_v else None
+        )

@@ -9,11 +9,13 @@ from fastapi import HTTPException, BackgroundTasks
 from app.db.schema import (
     User, Tenant, TenantType,
     Product, ProductMedia,
-    AuditAction
+    AuditAction, SupplierProfile,
+    ProductVersion, ProductVersionStatus
 )
 from app.models.product import (
     ProductCreate, ProductIdentityUpdate, ProductRead,
     ProductMediaAdd, ProductMediaRead, ProductMediaReorder,
+    ProductReadDetailView, ProductVersionSummary, ProductVersionGroup,
 )
 from app.utils.file_storage import save_base64_image
 from app.core.audit import _perform_audit_log
@@ -172,7 +174,7 @@ class ProductService:
 
         return [self._map_to_read_model(p) for p in products]
 
-    def get_product(self, user: User, product_id: uuid.UUID) -> ProductRead:
+    def get_product(self, user: User, product_id: uuid.UUID) -> ProductReadDetailView:
         """
         Get single product details with full media gallery.
         """
@@ -188,7 +190,67 @@ class ProductService:
         if not product:
             raise HTTPException(status_code=404, detail="Product not found.")
 
-        return self._map_to_read_model(product)
+        # 1. Base Mapping
+        base_read = self._map_to_read_model(product)
+
+        # 2. Lift to Detail View
+        detail_view = ProductReadDetailView.model_validate(
+            base_read.model_dump()
+        )
+
+        # 3. Populate Versions (History)
+        if product.technical_versions:
+            # Sort by sequence desc
+            sorted_versions = sorted(
+                product.technical_versions,
+                key=lambda v: v.version_sequence,
+                reverse=True
+            )
+
+            # Collect all unique supplier tenant IDs from the versions
+            supplier_tenant_ids = {
+                v.supplier_tenant_id for v in sorted_versions if v.supplier_tenant_id
+            }
+
+            # Fetch Supplier Profiles for these tenants (Scoped to Brand's Address Book)
+            supplier_map = {}
+            if supplier_tenant_ids:
+                profiles = self.session.exec(
+                    select(SupplierProfile)
+                    .where(
+                        SupplierProfile.tenant_id == brand.id,
+                        col(SupplierProfile.supplier_tenant_id).in_(
+                            supplier_tenant_ids)
+                    )
+                ).all()
+                # Create map: supplier_tenant_id -> SupplierProfile
+                for prof in profiles:
+                    if prof.supplier_tenant_id:
+                        supplier_map[prof.supplier_tenant_id] = prof
+
+            detail_view.versions = []
+            for v in sorted_versions:
+                summary = ProductVersionSummary(
+                    id=v.id,
+                    version_sequence=v.version_sequence,
+                    revision=v.revision,
+                    version_name=v.version_name,
+                    status=v.status,
+                    created_at=v.created_at,
+                    updated_at=v.updated_at,
+                    is_latest=False
+                )
+
+                # Attach Supplier Info
+                if v.supplier_tenant_id and v.supplier_tenant_id in supplier_map:
+                    profile = supplier_map[v.supplier_tenant_id]
+                    summary.supplier_name = profile.name
+                    # The ID of the SupplierProfile (Address Book Entry)
+                    summary.supplier_id = profile.id
+
+                detail_view.versions.append(summary)
+
+        return detail_view
 
     # ==========================================================================
     # CREATE OPERATION
@@ -285,6 +347,81 @@ class ProductService:
             logger.error(f"Product creation failed: {e}")
             raise HTTPException(
                 status_code=500, detail="Could not create product.")
+
+    def get_version_history(self, user: User, product_id: uuid.UUID) -> List[ProductVersionGroup]:
+        """
+        Returns all versions grouped by sequence with their revisions.
+        Used by frontend to build hierarchical version tree and comparison picker.
+        """
+        brand = self._get_brand_context(user)
+
+        product = self.session.get(Product, product_id)
+        if not product or product.tenant_id != brand.id:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        # Fetch all versions for this product
+        versions = self.session.exec(
+            select(ProductVersion)
+            .where(ProductVersion.product_id == product_id)
+            .order_by(
+                ProductVersion.version_sequence.desc(),
+                ProductVersion.revision.desc()
+            )
+        ).all()
+
+        if not versions:
+            return []
+
+        # Find absolute latest version
+        latest_version_id = versions[0].id if versions else None
+
+        # Group by version_sequence
+        from collections import defaultdict
+        groups_dict = defaultdict(list)
+
+        for v in versions:
+            groups_dict[v.version_sequence].append(v)
+
+        # Build response groups
+        result = []
+        for seq in sorted(groups_dict.keys(), reverse=True):
+            revisions_list = groups_dict[seq]
+            latest_rev = revisions_list[0]  # Already sorted DESC
+
+            # Resolve supplier info (if any)
+            # We look for the latest request linked to any revision in this sequence
+            supplier_name = None
+            supplier_id = None
+
+            # Simple approach: check latest revision for supplier info
+            # In real system, you might query ProductContributionRequest
+            # For now, leave as None (can be enhanced later)
+
+            revision_summaries = [
+                ProductVersionSummary(
+                    id=rev.id,
+                    version_sequence=rev.version_sequence,
+                    revision=rev.revision,
+                    version_name=rev.version_name,
+                    status=rev.status,
+                    created_at=rev.created_at,
+                    updated_at=rev.updated_at,
+                    supplier_name=supplier_name,
+                    supplier_id=supplier_id,
+                    is_latest=(rev.id == latest_version_id)
+                )
+                for rev in revisions_list
+            ]
+
+            result.append(ProductVersionGroup(
+                version_sequence=seq,
+                version_name=latest_rev.version_name,
+                latest_status=latest_rev.status,
+                latest_revision=latest_rev.revision,
+                revisions=revision_summaries
+            ))
+
+        return result
 
     # ==========================================================================
     # UPDATE IDENTITY

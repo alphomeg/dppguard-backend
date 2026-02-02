@@ -72,3 +72,7 @@ class PublicTenantRead(SQLModel):
     type: TenantType = Field(
         description="The role of this tenant (Brand, Supplier, Recycler).")
     location_country: str = Field(description="ISO Country Code.")
+
+
+class TenantConnectionRequestRespond(SQLModel):
+    accept: bool

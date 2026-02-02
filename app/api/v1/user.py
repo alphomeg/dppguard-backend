@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from loguru import logger
 
 from app.core.dependencies import get_user_service, get_current_user
@@ -24,6 +24,7 @@ router = APIRouter()
 )
 def signup(
     user_in: UserCreate,
+    background_tasks: BackgroundTasks,
     service: UserService = Depends(get_user_service)
 ):
     """
@@ -33,7 +34,7 @@ def signup(
     4. Returns public user info.
     """
     try:
-        new_user = service.create_user(user_in)
+        new_user = service.create_user(user_in, background_tasks)
         return new_user
 
     except ValueError as e:
