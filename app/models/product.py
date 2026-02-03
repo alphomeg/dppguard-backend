@@ -187,6 +187,11 @@ class ProductIdentityUpdate(SQLModel):
         max_length=12,
         description="Update the UPC code."
     )
+    internal_erp_id: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Update the internal ERP system ID."
+    )
     lifecycle_status: Optional[ProductLifecycleStatus] = Field(
         default=None,
         description="Update the overall lifecycle status (e.g., move to ARCHIVED)."
@@ -223,6 +228,10 @@ class ProductRead(SQLModel):
     upc: Optional[str] = Field(
         default=None,
         description="Universal Product Code."
+    )
+    internal_erp_id: Optional[str] = Field(
+        default=None,
+        description="Internal system ID for mapping to legacy systems."
     )
     lifecycle_status: ProductLifecycleStatus = Field(
         description="Current lifecycle status."

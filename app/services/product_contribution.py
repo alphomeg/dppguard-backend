@@ -15,7 +15,7 @@ from app.db.schema import (
     ProductVersionMaterial, ProductVersionSupplyNode, ProductVersionCertificate,
     SupplierArtifact, ArtifactType,
     ConnectionStatus, SupplierProfile, TenantConnection,
-    CertificateDefinition
+    CertificateDefinition, TenantMember, MemberStatus
 )
 from app.models.product_contribution import (
     RequestReadList, RequestReadDetail, RequestAction,
@@ -75,16 +75,20 @@ class ProductContributionService:
             )
         return tenant
 
-    def _deep_clone_version(self, source_version: ProductVersion, new_version_sequence: int, new_status: ProductVersionStatus, new_revision: int = 0) -> ProductVersion:
+    def _deep_clone_version(self, source_version: ProductVersion, new_version_sequence: int, new_status: ProductVersionStatus, new_revision: int = 0, version_name: Optional[str] = None) -> ProductVersion:
         """
         Internal Helper: Creates a deep copy of a ProductVersion.
         Clones: Metadata, Materials, Supply Chain, and Certificate Links.
         Does NOT clone the actual SupplierArtifacts (files), just the references to them.
         """
-        # Logic: If major version change, append Copy. If revision, keep name.
-        final_name = source_version.version_name
-        if new_version_sequence != source_version.version_sequence:
-            final_name = f"{source_version.version_name} (Copy)"
+        # Use provided version_name if given, otherwise use logic based on sequence change
+        if version_name:
+            final_name = version_name
+        else:
+            # Logic: If major version change, append Copy. If revision, keep name.
+            final_name = source_version.version_name
+            if new_version_sequence != source_version.version_sequence:
+                final_name = f"{source_version.version_name} (Copy)"
 
         # 1. Clone Shell
         new_version = ProductVersion(
@@ -173,10 +177,12 @@ class ProductContributionService:
                 id=req.id,
                 brand_name=brand.name if brand else "Unknown Brand",
                 product_name=prod.name,
+                product_description=prod.description,
                 product_image_url=prod.main_image_url,
                 sku=prod.sku,
                 version_name=ver.version_name,
                 due_date=req.due_date,
+                request_note=req.request_note,
                 status=req.status,
                 updated_at=req.updated_at
             ))
@@ -231,10 +237,32 @@ class ProductContributionService:
         for c in req.comments:
             author = self.session.get(User, c.author_user_id)
             name = f"{author.first_name} {author.last_name}" if author else "System"
+            
+            # Determine appropriate title based on comment content and context
+            title = 'Comment'
+            if c.is_rejection_reason:
+                # Check if it's a cancellation comment
+                if c.body.startswith("Request Cancelled:"):
+                    title = 'Request Cancelled'
+                else:
+                    title = 'Changes Requested'
+            elif req.status == RequestStatus.DECLINED:
+                # Check if this comment is from supplier (decline reason)
+                # Query author's active membership to determine their tenant
+                if author:
+                    author_membership = self.session.exec(
+                        select(TenantMember)
+                        .where(TenantMember.user_id == author.id)
+                        .where(TenantMember.status == MemberStatus.ACTIVE)
+                    ).first()
+                    if author_membership and author_membership.tenant_id == supplier.id:
+                        # This is likely the decline reason from supplier
+                        title = 'Request Declined'
+            
             history_items.append(ActivityLogItem(
                 id=c.id,
                 type='comment',
-                title='Comment' if not c.is_rejection_reason else 'Changes Requested',
+                title=title,
                 date=c.created_at,
                 user_name=name,
                 note=c.body
@@ -243,42 +271,60 @@ class ProductContributionService:
         history_items.sort(key=lambda x: x.date, reverse=True)
 
         # 4. Map Technical Data (Draft State)
-        draft_data = TechnicalDataUpdate(
-            manufacturing_country=version.manufacturing_country,
-            total_carbon_footprint=version.total_carbon_footprint,
-            total_energy_mj=version.total_energy_mj,
-            total_water_usage=version.total_water_usage,
+        # SECURITY: Only expose technical data if supplier has accepted the request
+        # When status is SENT, supplier should only see product info, not technical details
+        if req.status == RequestStatus.SENT:
+            # Return empty technical data - supplier hasn't accepted yet
+            draft_data = TechnicalDataUpdate(
+                manufacturing_country=None,
+                total_carbon_footprint=None,
+                total_energy_mj=None,
+                total_water_usage=None,
+                materials=[],
+                sub_suppliers=[],
+                certificates=[]
+            )
+        else:
+            # Supplier has accepted or request is in progress - show full technical data
+            draft_data = TechnicalDataUpdate(
+                manufacturing_country=version.manufacturing_country,
+                total_carbon_footprint=version.total_carbon_footprint,
+                total_energy_mj=version.total_energy_mj,
+                total_water_usage=version.total_water_usage,
 
-            materials=[
-                MaterialInput(
-                    lineage_id=m.lineage_id,
-                    name=m.material_name,
-                    percentage=m.percentage,
-                    origin_country=m.origin_country,
-                    transport_method=m.transport_method
-                ) for m in version.materials
-            ],
+                materials=[
+                    MaterialInput(
+                        lineage_id=m.lineage_id,
+                        source_material_definition_id=m.source_material_definition_id,
+                        name=m.material_name,
+                        percentage=m.percentage,
+                        origin_country=m.origin_country,
+                        transport_method=m.transport_method
+                    ) for m in version.materials
+                ],
 
-            sub_suppliers=[
-                SubSupplierInput(
-                    lineage_id=s.lineage_id,
-                    role=s.role,
-                    name=s.company_name,
-                    country=s.location_country
-                ) for s in version.supply_chain
-            ],
+                sub_suppliers=[
+                    SubSupplierInput(
+                        lineage_id=s.lineage_id,
+                        role=s.role,
+                        name=s.company_name,
+                        country=s.location_country
+                    ) for s in version.supply_chain
+                ],
 
-            certificates=[
-                CertificateInput(
-                    id=str(c.id),  # Return ID of the link, not the artifact
-                    lineage_id=c.lineage_id,
-                    certificate_type_id=c.certificate_type_id,
-                    name=c.snapshot_name,
-                    expiry_date=c.valid_until,
-                    file_url=c.file_url
-                ) for c in version.certificates
-            ]
-        )
+                certificates=[
+                    CertificateInput(
+                        id=str(c.id),  # Return ID of the link, not the artifact
+                        lineage_id=c.lineage_id,
+                        certificate_type_id=c.certificate_type_id,
+                        source_artifact_id=c.source_artifact_id,
+                        name=c.snapshot_name,
+                        issuer=c.snapshot_issuer,  # Include for display, but not accepted as input
+                        expiry_date=c.valid_until,
+                        file_url=c.file_url
+                    ) for c in version.certificates
+                ]
+            )
 
         # 5. Map Product Images (Marketing)
         images = [m.file_url for m in product.marketing_media if not m.is_deleted]
@@ -288,11 +334,12 @@ class ProductContributionService:
             brand_name=brand.name,
             status=req.status,
             due_date=req.due_date,
-            request_note=req.request_note,
+            request_note=req.request_note,  # Brand's initial instruction/comment
+            created_at=req.created_at,
             updated_at=req.updated_at,
             product_name=product.name,
             sku=product.sku,
-            product_description=product.description,
+            product_description=product.description,  # Product description for supplier to review
             product_images=images,
             version_name=version.version_name,
             current_draft=draft_data,
@@ -327,11 +374,28 @@ class ProductContributionService:
                 raise HTTPException(
                     status_code=400, detail="Can only accept 'Sent' requests.")
 
+            # Ensure version is in acceptable state for acceptance
+            # Version should be DRAFT (new assignment) or REJECTED (if previously rejected)
+            if version.status not in [ProductVersionStatus.DRAFT, ProductVersionStatus.REJECTED]:
+                raise HTTPException(
+                    status_code=409,  # Conflict
+                    detail=f"Cannot accept request: Version status is {version.status.value}. Expected DRAFT or REJECTED."
+                )
+
             req.status = RequestStatus.IN_PROGRESS
             # Ensure version is editable
             version.status = ProductVersionStatus.DRAFT
 
         elif data.action == "decline":
+            # Suppliers can only decline before submitting (SENT, IN_PROGRESS, or CHANGES_REQUESTED)
+            # Once submitted, they must wait for brand review
+            if req.status in [RequestStatus.SUBMITTED, RequestStatus.COMPLETED, RequestStatus.DECLINED, RequestStatus.CANCELLED]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot decline request. Current status is '{req.status.value}'. "
+                           f"Suppliers can only decline requests that are not yet submitted or completed."
+                )
+            
             req.status = RequestStatus.DECLINED
             version.status = ProductVersionStatus.REJECTED
 
@@ -339,6 +403,13 @@ class ProductContributionService:
             if req.status not in [RequestStatus.IN_PROGRESS, RequestStatus.CHANGES_REQUESTED]:
                 raise HTTPException(
                     status_code=400, detail="Request must be In Progress to submit.")
+
+            # CRITICAL: Ensure version is actually editable before locking it
+            if version.status != ProductVersionStatus.DRAFT:
+                raise HTTPException(
+                    status_code=409,  # Conflict
+                    detail=f"Cannot submit: Version is already {version.status.value}. Only DRAFT versions can be submitted."
+                )
 
             # LOCK DATA
             req.status = RequestStatus.SUBMITTED
@@ -391,18 +462,27 @@ class ProductContributionService:
             raise HTTPException(status_code=404, detail="Request not found.")
 
         # Integrity Check: Is it editable?
-        if req.status not in [RequestStatus.IN_PROGRESS, RequestStatus.CHANGES_REQUESTED, RequestStatus.ACCEPTED]:
+        # NOTE: RequestStatus.ACCEPTED doesn't exist - "accept" action sets status to IN_PROGRESS
+        if req.status not in [RequestStatus.IN_PROGRESS, RequestStatus.CHANGES_REQUESTED]:
             raise HTTPException(
                 status_code=400, detail="Cannot edit data in current status.")
 
         version = self.session.get(ProductVersion, req.current_version_id)
 
         # 2. NEW: Data Integrity Guard (Defense in Depth)
-        # Even if the request says 'In Progress', if the version is locked/cancelled, we MUST NOT write.
+        # CRITICAL: Explicitly block editing when version is SUBMITTED or APPROVED
+        # Even if the request says 'In Progress', if the version is locked, we MUST NOT write.
+        if version.status in [ProductVersionStatus.SUBMITTED, ProductVersionStatus.APPROVED]:
+            raise HTTPException(
+                status_code=409,  # Conflict
+                detail=f"Cannot edit data: The technical version is locked ({version.status.value}). Supplier cannot modify submitted or approved versions."
+            )
+        
+        # Additional check: Only DRAFT versions can be edited
         if version.status != ProductVersionStatus.DRAFT:
             raise HTTPException(
                 status_code=409,  # Conflict
-                detail=f"Cannot edit data: The technical version is locked ({version.status.value})."
+                detail=f"Cannot edit data: Version must be in DRAFT status to allow edits. Current status: {version.status.value}."
             )
 
         # 1. Update Scalars
@@ -416,8 +496,9 @@ class ProductContributionService:
             version.total_water_usage = data.total_water_usage
 
         # 2. Update Materials (Full Replace Strategy with Lineage Tracking)
-        # Build map of existing lineage IDs for validation
+        # Build map of existing lineage IDs for validation and preserve source_material_definition_id
         existing_material_lineages = {m.lineage_id for m in version.materials}
+        existing_material_definitions = {m.lineage_id: m.source_material_definition_id for m in version.materials}
 
         for m in list(version.materials):
             self.session.delete(m)
@@ -435,9 +516,16 @@ class ProductContributionService:
             else:
                 final_lineage_id = uuid.uuid4()  # Generate new for new items
 
+            # Use source_material_definition_id from frontend, or preserve existing if not provided
+            source_def_id = m_in.source_material_definition_id
+            if not source_def_id and m_in.lineage_id and m_in.lineage_id in existing_material_definitions:
+                # Fallback: preserve existing if frontend didn't provide one
+                source_def_id = existing_material_definitions.get(m_in.lineage_id)
+
             self.session.add(ProductVersionMaterial(
                 version_id=version.id,
                 lineage_id=final_lineage_id,
+                source_material_definition_id=source_def_id,  # Use from frontend or preserve existing
                 material_name=m_in.name,
                 percentage=m_in.percentage,
                 origin_country=m_in.origin_country,
@@ -475,8 +563,20 @@ class ProductContributionService:
         # Map uploaded files by their internal ID from the frontend (temp_file_id)
         file_map = {f.filename: f for f in files}
 
-        # Build map of existing lineage IDs for validation
+        # Build map of existing lineage IDs for validation and preserve existing issuer info and source_artifact_id
         existing_cert_lineages = {c.lineage_id for c in version.certificates}
+        existing_cert_issuers = {c.lineage_id: c.snapshot_issuer for c in version.certificates}
+        existing_cert_artifacts = {c.lineage_id: c.source_artifact_id for c in version.certificates}
+
+        # Fetch all certificate definitions to get issuer_authority as fallback
+        cert_type_ids = list({cert_input.certificate_type_id for cert_input in data.certificates})
+        cert_definitions = {}
+        if cert_type_ids:
+            cert_defs = self.session.exec(
+                select(CertificateDefinition)
+                .where(CertificateDefinition.id.in_(cert_type_ids))
+            ).all()
+            cert_definitions = {cd.id: cd.issuer_authority for cd in cert_defs}
 
         # Clear existing certificate links
         # (We recreate them to ensure the list matches the frontend state exactly)
@@ -527,10 +627,16 @@ class ProductContributionService:
                 self.session.flush()  # Get ID
 
                 final_file_url = saved_url
-                artifact_id = artifact.id
+                artifact_id = artifact.id  # Use new artifact for new upload
 
             # CASE B: EXISTING FILE (NO NEW UPLOAD)
             elif final_file_url:
+                # Use source_artifact_id from frontend (the file/artifact from supplier's library), or preserve existing if not provided
+                artifact_id = cert_input.source_artifact_id
+                if not artifact_id and cert_input.lineage_id and cert_input.lineage_id in existing_cert_artifacts:
+                    # Fallback: preserve existing artifact/file link if frontend didn't provide one
+                    artifact_id = existing_cert_artifacts[cert_input.lineage_id]
+                
                 # Guess Type for Snapshot
                 mime, _ = mimetypes.guess_type(final_file_url)
                 if mime:
@@ -538,14 +644,37 @@ class ProductContributionService:
 
             # Create Link (Snapshot)
             if final_file_url:
+                # Determine issuer - ALWAYS from certificate definition, never from frontend input
+                # Fallback priority:
+                # 1. Existing issuer if editing existing certificate (preserve what was there)
+                # 2. Certificate definition's issuer_authority (automatic from certificate type)
+                # 3. "Unknown" as last resort
+                # NOTE: cert_input.issuer is IGNORED - issuer is always fetched from certificate definition
+                
+                final_issuer = None
+                
+                # If editing existing certificate, preserve existing issuer
+                if cert_input.lineage_id and cert_input.lineage_id in existing_cert_issuers:
+                    existing_issuer = existing_cert_issuers[cert_input.lineage_id]
+                    # Use existing issuer (preserve what was there)
+                    final_issuer = existing_issuer
+                
+                # If still no issuer, fetch from certificate definition's issuer_authority
+                if not final_issuer and cert_input.certificate_type_id in cert_definitions:
+                    final_issuer = cert_definitions[cert_input.certificate_type_id]
+                
+                # Default to "Unknown" only if no issuer found anywhere
+                if not final_issuer:
+                    final_issuer = "Unknown"
+                
                 new_link = ProductVersionCertificate(
                     version_id=version.id,
                     lineage_id=final_lineage_id,
                     certificate_type_id=cert_input.certificate_type_id,
-                    # Might be None if existing and we didn't recover it, but URL is safe
+                    # Link to the SupplierArtifact (file) that was used - either from library selection or newly uploaded
                     source_artifact_id=artifact_id,
                     snapshot_name=cert_input.name,
-                    snapshot_issuer="Unknown",  # Could be added to form input later
+                    snapshot_issuer=final_issuer,
                     valid_until=cert_input.expiry_date,
                     file_url=final_file_url,
                     file_name=cert_input.name,
@@ -670,7 +799,8 @@ class ProductContributionService:
                 source_version=latest_approved,
                 new_version_sequence=next_sequence,
                 new_status=ProductVersionStatus.DRAFT,
-                new_revision=0  # Reset revision for new major version
+                new_revision=0,  # Reset revision for new major version
+                version_name=data.version_name  # Use brand-provided version name
             )
         else:
             # SCENARIO B: No Approved history exists.
@@ -678,15 +808,13 @@ class ProductContributionService:
             # 1. Very first assignment (all_versions is empty)
             # 2. Previous attempt was Cancelled/Rejected before Approval (all_versions exists, but none Approved)
 
-            # We create a FRESH, EMPTY version.
-            v_name = product.pending_version_name or f"Version {next_sequence}"
-
+            # We create a FRESH, EMPTY version with brand-provided version name.
             target_version = ProductVersion(
                 product_id=product.id,
                 supplier_tenant_id=real_supplier_id,
                 version_sequence=next_sequence,
                 revision=0,
-                version_name=v_name,
+                version_name=data.version_name,  # Use brand-provided version name
                 status=ProductVersionStatus.DRAFT
                 # Note: No data fields copied. Supplier starts from scratch.
             )
@@ -785,6 +913,7 @@ class ProductContributionService:
 
             materials=[ProductMaterialRead(
                 id=m.id,
+                lineage_id=m.lineage_id,
                 material_name=m.material_name,
                 percentage=m.percentage,
                 origin_country=m.origin_country,
@@ -793,6 +922,7 @@ class ProductContributionService:
 
             supply_chain=[ProductSupplyNodeRead(
                 id=s.id,
+                lineage_id=s.lineage_id,
                 role=s.role,
                 company_name=s.company_name,
                 location_country=s.location_country
@@ -800,6 +930,7 @@ class ProductContributionService:
 
             certificates=[ProductCertificateRead(
                 id=c.id,
+                lineage_id=c.lineage_id,
                 certificate_type_id=c.certificate_type_id,
                 snapshot_name=c.snapshot_name,
                 snapshot_issuer=c.snapshot_issuer,
@@ -845,6 +976,7 @@ class ProductContributionService:
             .where(ProductContributionRequest.current_version_id == version.id)
             .where(ProductContributionRequest.brand_tenant_id == brand.id)
             .order_by(ProductContributionRequest.created_at.desc())
+            .options(selectinload(ProductContributionRequest.comments))
         ).first()
 
         supplier_name = None
@@ -854,6 +986,7 @@ class ProductContributionService:
         req_status = None
         req_id = None
         req_updated_at = None
+        decline_reason = None
 
         if request:
             req_id = request.id
@@ -880,6 +1013,26 @@ class ProductContributionService:
                 if supplier:
                     supplier_name = supplier.name
                     supplier_country = supplier.location_country
+            
+            # Fetch decline reason if request is declined
+            if req_status == RequestStatus.DECLINED and request.comments:
+                # Find the decline reason comment from supplier (most recent one)
+                supplier_tenant_id = request.supplier_tenant_id
+                # Sort comments by date descending to get most recent first
+                sorted_comments = sorted(request.comments, key=lambda c: c.created_at, reverse=True)
+                for comment in sorted_comments:
+                    # Check if comment author belongs to supplier tenant
+                    comment_author = self.session.get(User, comment.author_user_id)
+                    if comment_author:
+                        author_membership = self.session.exec(
+                            select(TenantMember)
+                            .where(TenantMember.user_id == comment_author.id)
+                            .where(TenantMember.status == MemberStatus.ACTIVE)
+                        ).first()
+                        if author_membership and author_membership.tenant_id == supplier_tenant_id:
+                            # This is the decline reason from supplier (most recent supplier comment)
+                            decline_reason = comment.body
+                            break
 
         return ProductCollaborationStatusRead(
             active_request_id=req_id,
@@ -891,7 +1044,8 @@ class ProductContributionService:
             assigned_supplier_profile_id=supplier_profile_id,
             supplier_country=supplier_country,
             due_date=due_date,
-            last_updated_at=req_updated_at if req_updated_at else version.updated_at
+            last_updated_at=req_updated_at if req_updated_at else version.updated_at,
+            decline_reason=decline_reason
         )
 
     def cancel_request(self, user: User, product_id: uuid.UUID, request_id: uuid.UUID, reason: str):
@@ -973,6 +1127,13 @@ class ProductContributionService:
             request.status = RequestStatus.CHANGES_REQUESTED
             version.status = ProductVersionStatus.REJECTED  # Mark old as Rejected
 
+            # Require comment when requesting changes
+            if not comment or not comment.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="A comment is required when requesting changes. Please provide feedback to the supplier."
+                )
+
             # Create New Revision (Clone)
             new_draft = self._deep_clone_version(
                 source_version=version,
@@ -988,12 +1149,12 @@ class ProductContributionService:
         else:
             raise HTTPException(status_code=400, detail="Invalid action.")
 
-        # Add Comment
-        if comment:
+        # Add Comment (required for request_changes, optional for approve)
+        if comment and comment.strip():
             self.session.add(CollaborationComment(
                 request_id=request.id,
                 author_user_id=user.id,
-                body=comment,
+                body=comment.strip(),
                 is_rejection_reason=(action == "request_changes")
             ))
 
@@ -1030,6 +1191,8 @@ class ProductContributionService:
             ))
 
         return VersionComparisonSnapshot(
+            version_sequence=version.version_sequence,
+            revision=version.revision or 0,
             version_label=f"{version.version_name} ({version.status.value})",
             materials=[
                 VersionComparisonMaterial(

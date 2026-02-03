@@ -17,6 +17,10 @@ class MaterialInput(SQLModel):
         default=None,
         description="Include when editing existing material. Omit for new materials."
     )
+    source_material_definition_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="Link to the MaterialDefinition from the supplier's material library. If this material was selected from the supplier's library of material definitions, provide the MaterialDefinition ID here. If creating a new material entry, leave null."
+    )
     name: str = Field(
         min_length=2,
         max_length=100,
@@ -75,6 +79,7 @@ class CertificateInput(SQLModel):
     """
     Represents a certificate attached to the technical version.
     Includes support for existing files (file_url) or new uploads (temp_file_id).
+    Note: issuer is automatically fetched from certificate_type_id -> issuer_authority, not provided by frontend.
     """
     id: Optional[str] = Field(
         default=None,
@@ -87,11 +92,19 @@ class CertificateInput(SQLModel):
     certificate_type_id: uuid.UUID = Field(
         description="UUID of the standard certificate definition (e.g. GOTS, Oeko-Tex)."
     )
+    source_artifact_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="Link to the SupplierArtifact (file) from the supplier's vault/library. This is the file/artifact that the supplier uploaded. If the certificate file was selected from the supplier's library, provide the SupplierArtifact ID here. If uploading a new file via temp_file_id, this will be automatically set to the newly created artifact."
+    )
     name: str = Field(
         min_length=2,
         max_length=100,
         schema_extra={"examples": ["GOTS - 2024 Audit"]},
         description="Display name or snapshot reference for this specific document."
+    )
+    issuer: Optional[str] = Field(
+        default=None,
+        description="READ-ONLY: Issuer is automatically populated from certificate definition. Not accepted as input."
     )
     expiry_date: Optional[date] = Field(
         default=None,
@@ -178,6 +191,12 @@ class ProductAssignmentRequest(SQLModel):
     supplier_profile_id: uuid.UUID = Field(
         description="The UUID of the SupplierProfile (from Brand's address book) to receive this request."
     )
+    version_name: str = Field(
+        min_length=2,
+        max_length=100,
+        schema_extra={"examples": ["SS25 Launch Batch", "Lot 405"]},
+        description="Name for this version/batch. Can be duplicate across different requests."
+    )
     due_date: Optional[date] = Field(
         default=None,
         description="The deadline for submission."
@@ -241,7 +260,8 @@ class RequestReadDetail(SQLModel):
     brand_name: str = Field(description="Name of the Brand requesting data.")
     status: RequestStatus = Field(description="Current status of the request.")
     due_date: Optional[date] = Field(description="Submission deadline.")
-    request_note: Optional[str] = Field(description="Instructions from Brand.")
+    request_note: Optional[str] = Field(description="Initial instructions/comment from Brand when creating the request.")
+    created_at: datetime = Field(description="When the request was created.")
     updated_at: datetime = Field(description="Last modification time.")
 
     # Product Info (Read Only)
@@ -273,11 +293,15 @@ class RequestReadList(SQLModel):
     id: uuid.UUID = Field(description="Request ID.")
     brand_name: str = Field(description="Brand Name.")
     product_name: str = Field(description="Product Name.")
+    product_description: Optional[str] = Field(
+        default=None, description="Product description for supplier to review.")
     product_image_url: Optional[str] = Field(
         default=None, description="Thumbnail URL.")
     sku: str = Field(description="SKU.")
     version_name: str = Field(description="Version/Batch Name.")
     due_date: Optional[date] = Field(default=None, description="Deadline.")
+    request_note: Optional[str] = Field(
+        default=None, description="Initial instructions/comment from Brand when creating the request.")
     status: RequestStatus = Field(description="Current Workflow Status.")
     updated_at: datetime = Field(description="Last update timestamp.")
 
@@ -361,6 +385,12 @@ class ProductCollaborationStatusRead(SQLModel):
 
     due_date: Optional[date] = None
     last_updated_at: datetime
+    
+    # Notes/Reasons
+    decline_reason: Optional[str] = Field(
+        default=None,
+        description="Reason provided by supplier when declining the request."
+    )
 
 
 # ==========================================
@@ -391,6 +421,12 @@ class VersionComparisonSnapshot(SQLModel):
     A flattened view of a single version for side-by-side UI.
     """
     version_label: str
+    version_sequence: int = Field(
+        description="The major version number (e.g., 1, 2, 3)."
+    )
+    revision: int = Field(
+        description="Highest revision number in this sequence."
+    )
     materials: List[VersionComparisonMaterial] = []
     supply_chain: List[VersionComparisonSupply] = []
     impact: List[VersionComparisonImpact] = []

@@ -121,6 +121,7 @@ class ProductService:
             description=product.description,
             ean=product.ean,
             upc=product.upc,
+            internal_erp_id=product.internal_erp_id,
             lifecycle_status=product.lifecycle_status,
             main_image_url=product.main_image_url,
             latest_version_id=latest_v_id,
@@ -450,6 +451,8 @@ class ProductService:
             product.ean = data.ean
         if data.upc is not None:
             product.upc = data.upc
+        if data.internal_erp_id is not None:
+            product.internal_erp_id = data.internal_erp_id
         if data.lifecycle_status is not None:
             product.lifecycle_status = data.lifecycle_status
 
