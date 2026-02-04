@@ -79,7 +79,12 @@ class CertificateInput(SQLModel):
     """
     Represents a certificate attached to the technical version.
     Includes support for existing files (file_url) or new uploads (temp_file_id).
-    Note: issuer is automatically fetched from certificate_type_id -> issuer_authority, not provided by frontend.
+    
+    Certificate Standard Selection:
+    - Option 1: Select from library by providing certificate_type_id (certificate_type will be populated from CertificateDefinition.name)
+    - Option 2: Enter manually by providing certificate_type (for unlisted certificates)
+    
+    Similar to MaterialInput: certificate_type is the primary storage field (like material_name), not just a snapshot.
     """
     id: Optional[str] = Field(
         default=None,
@@ -89,8 +94,17 @@ class CertificateInput(SQLModel):
         default=None,
         description="Include when editing existing certificate. Omit for new certificates."
     )
-    certificate_type_id: uuid.UUID = Field(
-        description="UUID of the standard certificate definition (e.g. GOTS, Oeko-Tex)."
+    certificate_type_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="Link to the CertificateDefinition from the supplier's certificate library. If this certificate was selected from the library, provide the CertificateDefinition ID here. The certificate_type will be automatically populated from the definition. If creating an entry for an unlisted certificate, leave null and provide certificate_type."
+    )
+    # Certificate type (primary storage - can come from library or be manually entered)
+    # Similar to MaterialInput.name - we only store the type, not code/category/description
+    certificate_type: Optional[str] = Field(
+        default=None,
+        min_length=2,
+        max_length=200,
+        description="Name of the certificate standard (e.g., 'Global Organic Textile Standard (GOTS) v7.0'). Required if certificate_type_id is not provided (for unlisted certificates). If certificate_type_id is provided, this will be populated from CertificateDefinition.name."
     )
     source_artifact_id: Optional[uuid.UUID] = Field(
         default=None,
@@ -337,6 +351,7 @@ class ProductCertificateRead(SQLModel):
     certificate_type_id: Optional[uuid.UUID]
     snapshot_name: str
     snapshot_issuer: str
+    certificate_type: str
     valid_until: Optional[date]
     file_url: str
     file_type: str

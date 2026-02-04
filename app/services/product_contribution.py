@@ -33,6 +33,29 @@ from app.core.audit import _perform_audit_log
 from app.utils.file_storage import save_upload_file
 
 
+def _get_certificate_type_value(cert: ProductVersionCertificate) -> str:
+    """
+    Helper to safely get certificate_type column value, avoiding relationship conflict.
+    Since we renamed the relationship to certificate_definition, certificate_type should
+    access the column, but we add a safety check.
+    """
+    # Try to get from instance dict first (most reliable)
+    value = getattr(cert, '__dict__', {}).get('certificate_type')
+    if isinstance(value, str):
+        return value
+    # If not in dict or not a string, try direct access
+    value = getattr(cert, 'certificate_type', None)
+    if isinstance(value, str):
+        return value
+    # Fallback: if it's the relationship object, get name from it
+    if hasattr(value, 'name'):
+        return value.name
+    # Last resort: use relationship
+    if cert.certificate_definition:
+        return cert.certificate_definition.name
+    return None
+
+
 class ProductContributionService:
     def __init__(self, session: Session):
         self.session = session
@@ -136,7 +159,7 @@ class ProductContributionService:
             self.session.add(ProductVersionCertificate(
                 version_id=new_version.id,
                 lineage_id=c.lineage_id,  # PRESERVE lineage
-                certificate_type_id=c.certificate_type_id,
+                certificate_type_id=c.certificate_type_id,  # PRESERVE certificate_type_id (like source_material_definition_id)
                 source_artifact_id=c.source_artifact_id,  # Link to same vault item
                 file_url=c.file_url,                     # Same URL
                 file_name=c.file_name,
@@ -144,6 +167,8 @@ class ProductContributionService:
                 file_size_bytes=c.file_size_bytes,  # Preserve file size
                 snapshot_name=c.snapshot_name,
                 snapshot_issuer=c.snapshot_issuer,
+                # Preserve certificate type (from library or manually entered)
+                certificate_type=_get_certificate_type_value(c),
                 valid_until=c.valid_until,
                 reference_number=c.reference_number
             ))
@@ -333,7 +358,9 @@ class ProductContributionService:
                         source_artifact_id=c.source_artifact_id,
                         name=c.snapshot_name,
                         # If issuer is "Unknown" or missing, try to re-fetch from certificate definition
-                        issuer=cert_definitions_for_read.get(c.certificate_type_id) if (c.snapshot_issuer == "Unknown" or not c.snapshot_issuer) and c.certificate_type_id in cert_definitions_for_read else c.snapshot_issuer,
+                        issuer=cert_definitions_for_read.get(c.certificate_type_id) if (c.snapshot_issuer == "Unknown" or not c.snapshot_issuer) and c.certificate_type_id and c.certificate_type_id in cert_definitions_for_read else c.snapshot_issuer,
+                        # Return certificate name (from library or manually entered)
+                        certificate_type=_get_certificate_type_value(c),
                         expiry_date=c.valid_until,
                         file_url=c.file_url,
                         file_name=c.file_name,  # Include filename so frontend can preserve it on updates
@@ -583,8 +610,10 @@ class ProductContributionService:
         # Map uploaded files by their internal ID from the frontend (temp_file_id)
         file_map = {f.filename: f for f in files}
 
-        # Build map of existing lineage IDs for validation and preserve existing issuer info, source_artifact_id, file_name, file_type, and file_size
+        # Build map of existing lineage IDs for validation and preserve existing data (similar to materials)
         existing_cert_lineages = {c.lineage_id for c in version.certificates}
+        existing_cert_type_ids = {
+            c.lineage_id: c.certificate_type_id for c in version.certificates}
         existing_cert_issuers = {
             c.lineage_id: c.snapshot_issuer for c in version.certificates}
         existing_cert_artifacts = {
@@ -595,26 +624,26 @@ class ProductContributionService:
             c.lineage_id: c.file_type for c in version.certificates}
         existing_cert_file_sizes = {
             c.lineage_id: c.file_size_bytes for c in version.certificates}
+        # Preserve existing certificate type (can be from library or manually entered)
+        existing_cert_types = {
+            c.lineage_id: _get_certificate_type_value(c) for c in version.certificates}
 
-        # Fetch all certificate definitions to get issuer_authority as fallback
+        # Fetch all certificate definitions (full objects, not just issuer_authority)
         cert_type_ids = list(
-            {cert_input.certificate_type_id for cert_input in data.certificates})
-        cert_definitions = {}
+            {cert_input.certificate_type_id for cert_input in data.certificates if cert_input.certificate_type_id})
+        cert_definitions = {}  # Will store full CertificateDefinition objects
         if cert_type_ids:
             cert_defs = self.session.exec(
                 select(CertificateDefinition)
                 .where(CertificateDefinition.id.in_(cert_type_ids))
             ).all()
-            cert_definitions = {cd.id: cd.issuer_authority for cd in cert_defs if cd.issuer_authority}
+            cert_definitions = {cd.id: cd for cd in cert_defs}
             
-            # Log warning if any certificate definitions are missing or have empty issuer_authority
+            # Log warning if any certificate definitions are missing
             found_ids = {cd.id for cd in cert_defs}
             missing_ids = set(cert_type_ids) - found_ids
             if missing_ids:
                 logger.warning(f"Certificate definitions not found for IDs: {missing_ids}")
-            empty_issuer_ids = {cd.id for cd in cert_defs if not cd.issuer_authority}
-            if empty_issuer_ids:
-                logger.warning(f"Certificate definitions with empty issuer_authority: {empty_issuer_ids}")
 
         # Clear existing certificate links
         # (We recreate them to ensure the list matches the frontend state exactly)
@@ -623,22 +652,58 @@ class ProductContributionService:
         version.certificates = []
 
         for cert_input in data.certificates:
-            # Validate certificate definition exists and has issuer_authority
-            if cert_input.certificate_type_id not in cert_definitions:
-                # Try to fetch it individually to get better error message
-                cert_def = self.session.get(CertificateDefinition, cert_input.certificate_type_id)
-                if not cert_def:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Certificate definition with ID {cert_input.certificate_type_id} not found. Please ensure the certificate type exists."
-                    )
-                if not cert_def.issuer_authority or not cert_def.issuer_authority.strip():
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Certificate definition '{cert_def.name}' (ID: {cert_input.certificate_type_id}) has no issuer_authority set. Please update the certificate definition."
-                    )
-                # Add it to the map for use below
-                cert_definitions[cert_input.certificate_type_id] = cert_def.issuer_authority
+            # Handle certificate_type_id: 
+            # - If provided, use it (from library)
+            # - If None but certificate_type is provided, use manual entry (don't preserve old certificate_type_id)
+            # - If both None, preserve existing (for updates where frontend didn't change the selection)
+            final_cert_type_id = cert_input.certificate_type_id
+            
+            # Only preserve existing certificate_type_id if:
+            # 1. certificate_type_id is not provided (None)
+            # 2. certificate_type is also not provided (None) - meaning frontend didn't change anything
+            # 3. There's an existing certificate with this lineage_id
+            if final_cert_type_id is None and cert_input.certificate_type is None and cert_input.lineage_id and cert_input.lineage_id in existing_cert_type_ids:
+                # Preserve existing certificate_type_id when frontend didn't provide either field
+                final_cert_type_id = existing_cert_type_ids.get(cert_input.lineage_id)
+
+            # Validate certificate definition exists if certificate_type_id is provided
+            cert_def = None
+            if final_cert_type_id:
+                if final_cert_type_id not in cert_definitions:
+                    # Try to fetch it individually to get better error message
+                    cert_def = self.session.get(CertificateDefinition, final_cert_type_id)
+                    if not cert_def:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Certificate definition with ID {final_cert_type_id} not found. Please ensure the certificate type exists."
+                        )
+                    cert_definitions[final_cert_type_id] = cert_def
+                else:
+                    cert_def = cert_definitions[final_cert_type_id]
+
+            # Determine certificate type: from definition if certificate_type_id provided, else from manual input or existing
+            # Similar to material_name - we only store the type, not code/category/description
+            if cert_def:
+                # Use certificate definition to populate certificate type (from library)
+                cert_type = cert_def.name
+                final_issuer = cert_def.issuer_authority if cert_def.issuer_authority and cert_def.issuer_authority.strip() else "Unknown"
+            elif cert_input.certificate_type:
+                # Manual entry: use provided type (for unlisted certificates or when changing from library to manual)
+                cert_type = cert_input.certificate_type
+                # For manual entry, issuer can be provided or use existing
+                final_issuer = cert_input.issuer if cert_input.issuer else (
+                    existing_cert_issuers.get(cert_input.lineage_id) if cert_input.lineage_id and cert_input.lineage_id in existing_cert_issuers else "Unknown"
+                )
+            elif cert_input.lineage_id and cert_input.lineage_id in existing_cert_types:
+                # Preserve existing certificate type if updating and no new value provided
+                cert_type = existing_cert_types[cert_input.lineage_id]
+                final_issuer = existing_cert_issuers.get(cert_input.lineage_id) if cert_input.lineage_id in existing_cert_issuers else "Unknown"
+            else:
+                # Validation: must have either certificate_type_id OR certificate_type
+                raise HTTPException(
+                    status_code=400,
+                    detail="Either certificate_type_id must be provided (to select from library), or certificate_type must be provided (for manual entry of unlisted certificates)."
+                )
             
             # Handle lineage_id
             if cert_input.lineage_id:
@@ -734,45 +799,24 @@ class ProductContributionService:
                 if final_file_name is None:
                     final_file_name = cert_input.file_name or final_file_url.split("/")[-1]
 
-                # Determine issuer - ALWAYS from certificate definition, never from frontend input
-                # Fallback priority:
-                # 1. Certificate definition's issuer_authority (automatic from certificate type) - PREFERRED
-                # 2. Existing issuer if editing existing certificate (preserve what was there, unless it's "Unknown")
-                # 3. "Unknown" as last resort
-                # NOTE: cert_input.issuer is IGNORED - issuer is always fetched from certificate definition
-
-                final_issuer = None
-
-                # FIRST: Try to fetch from certificate definition (this is the source of truth)
-                if cert_input.certificate_type_id in cert_definitions:
-                    issuer_from_def = cert_definitions[cert_input.certificate_type_id]
-                    if issuer_from_def and issuer_from_def.strip():  # Ensure it's not empty
-                        final_issuer = issuer_from_def
-                    else:
-                        logger.warning(f"Certificate definition {cert_input.certificate_type_id} has empty issuer_authority")
-                else:
-                    logger.warning(f"Certificate definition {cert_input.certificate_type_id} not found in lookup")
-
-                # SECOND: If not found in definition, preserve existing issuer (unless it's "Unknown")
-                # This handles cases where definition might have been deleted, but we want to preserve valid issuers
-                if not final_issuer and cert_input.lineage_id and cert_input.lineage_id in existing_cert_issuers:
-                    existing_issuer = existing_cert_issuers[cert_input.lineage_id]
-                    # Only use existing issuer if it's not "Unknown" (Unknown means lookup failed before)
-                    if existing_issuer and existing_issuer != "Unknown":
-                        final_issuer = existing_issuer
-
-                # Default to "Unknown" only if no issuer found anywhere
-                if not final_issuer:
-                    final_issuer = "Unknown"
+                # Validate cert_type is set (should be set above, but double-check)
+                if not cert_type:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="certificate_type is required. Either provide certificate_type_id or certificate_type manually."
+                    )
 
                 new_link = ProductVersionCertificate(
                     version_id=version.id,
                     lineage_id=final_lineage_id,
-                    certificate_type_id=cert_input.certificate_type_id,
+                    certificate_type_id=final_cert_type_id,  # Use preserved/validated certificate_type_id (None if manually entered)
                     # Link to the SupplierArtifact (file) that was used - either from library selection or newly uploaded
                     source_artifact_id=artifact_id,
                     snapshot_name=cert_input.name,
                     snapshot_issuer=final_issuer,
+                    # Certificate type (from library or manually entered)
+                    # Similar to material_name - we only store the type, not code/category/description
+                    certificate_type=cert_type,
                     valid_until=cert_input.expiry_date,
                     file_url=final_file_url,
                     file_name=final_file_name,  # Preserve original filename with extension
@@ -1033,6 +1077,7 @@ class ProductContributionService:
                 certificate_type_id=c.certificate_type_id,
                 snapshot_name=c.snapshot_name,
                 snapshot_issuer=c.snapshot_issuer,
+                certificate_type=_get_certificate_type_value(c),
                 valid_until=c.valid_until,
                 file_url=c.file_url,
                 file_type=c.file_type,
@@ -1323,6 +1368,7 @@ class ProductContributionService:
                     certificate_type_id=c.certificate_type_id,
                     snapshot_name=c.snapshot_name,
                     snapshot_issuer=c.snapshot_issuer,
+                    certificate_type=_get_certificate_type_value(c),
                     valid_until=c.valid_until,
                     file_url=c.file_url,
                     file_type=c.file_type,

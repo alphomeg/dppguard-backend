@@ -875,7 +875,7 @@ class CertificateDefinition(TimestampMixin, SQLModel, table=True):
 
     # Traceability: We can track how many product batches claimed compliance with this standard
     linked_version_certificates: List["ProductVersionCertificate"] = Relationship(
-        back_populates="certificate_type")
+        back_populates="certificate_definition")
 
 
 class MaterialDefinition(TimestampMixin, SQLModel, table=True):
@@ -1163,14 +1163,20 @@ class ProductVersion(TimestampMixin, SQLModel, table=True):
 
 class ProductVersionCertificate(TimestampMixin, SQLModel, table=True):
     """
-    The 'Evidence Snapshot' linking a specific Product Batch (Version) to a Certificate Type.
+    The 'Evidence Snapshot' linking a specific Product Batch (Version) to a Certificate.
 
     CRITICAL AUDIT LOGIC:
-    This table acts as a self-contained archive. It copies BOTH the metadata (dates, issuer)
+    This table acts as a self-contained archive. It stores BOTH the certificate standard name
     AND the file details (URL, name) from the source.
+
+    Certificate Type:
+    - certificate_type is the PRIMARY storage field (similar to material_name in ProductVersionMaterial)
+    - It can come from CertificateDefinition.name (when certificate_type_id is set) OR be manually entered (for unlisted certificates)
+    - We only store the type, not code/category/description (matching the material pattern)
 
     If the Supplier deletes the original 'SupplierArtifact' from their library,
     this record REMAINS VALID because it holds its own copy of the file URL and details.
+    If the CertificateDefinition is deleted, certificate_type_id becomes NULL but the certificate fields remain.
     """
     id: uuid.UUID = Field(
         default_factory=uuid.uuid4,
@@ -1185,10 +1191,12 @@ class ProductVersionCertificate(TimestampMixin, SQLModel, table=True):
         description="The specific product batch/version this certificate is validating."
     )
 
-    # 2. The Definition (The Standard)
-    certificate_type_id: uuid.UUID = Field(
+    # 2. The Definition (The Standard) - Optional Reference
+    certificate_type_id: Optional[uuid.UUID] = Field(
+        default=None,
         foreign_key="certificatedefinition.id",
-        description="Link to the standard definition (e.g., GOTS) for categorization."
+        ondelete="SET NULL",
+        description="Reference to the CertificateDefinition from the library, if this certificate was selected from the library. If None, certificate_type was manually entered for an unlisted certificate. Similar to source_material_definition_id for materials."
     )
 
     # 3. The Lineage (Traceability)
@@ -1239,6 +1247,13 @@ class ProductVersionCertificate(TimestampMixin, SQLModel, table=True):
         description="The specific auditing body that signed this document. Example: 'Control Union Certifications'."
     )
 
+    # Certificate Type (Primary Storage - can come from library or be manually entered)
+    # Similar to material_name in ProductVersionMaterial - this is the living data field
+    # We only store the type, not code/category/description (matching the material pattern)
+    certificate_type: str = Field(
+        description="The type/standard of the certificate. Can be from library (CertificateDefinition.name) or manually entered for unlisted certificates. Example: 'ISO 14001:2015', 'Global Organic Textile Standard (GOTS) v7.0'. Similar to material_name in ProductVersionMaterial."
+    )
+
     issuer_address: Optional[str] = Field(
         default=None,
         description="City/Address of the auditing office. Useful for detecting fraud (e.g., A factory in China certified by an office in Brazil requires extra scrutiny)."
@@ -1275,7 +1290,7 @@ class ProductVersionCertificate(TimestampMixin, SQLModel, table=True):
     # Relationships
     version: "ProductVersion" = Relationship(back_populates="certificates")
 
-    certificate_type: "CertificateDefinition" = Relationship(
+    certificate_definition: "CertificateDefinition" = Relationship(
         back_populates="linked_version_certificates"
     )
 
