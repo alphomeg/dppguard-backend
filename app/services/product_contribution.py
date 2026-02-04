@@ -141,6 +141,7 @@ class ProductContributionService:
                 file_url=c.file_url,                     # Same URL
                 file_name=c.file_name,
                 file_type=c.file_type,
+                file_size_bytes=c.file_size_bytes,  # Preserve file size
                 snapshot_name=c.snapshot_name,
                 snapshot_issuer=c.snapshot_issuer,
                 valid_until=c.valid_until,
@@ -237,7 +238,7 @@ class ProductContributionService:
         for c in req.comments:
             author = self.session.get(User, c.author_user_id)
             name = f"{author.first_name} {author.last_name}" if author else "System"
-            
+
             # Determine appropriate title based on comment content and context
             title = 'Comment'
             if c.is_rejection_reason:
@@ -258,7 +259,7 @@ class ProductContributionService:
                     if author_membership and author_membership.tenant_id == supplier.id:
                         # This is likely the decline reason from supplier
                         title = 'Request Declined'
-            
+
             history_items.append(ActivityLogItem(
                 id=c.id,
                 type='comment',
@@ -286,6 +287,17 @@ class ProductContributionService:
             )
         else:
             # Supplier has accepted or request is in progress - show full technical data
+            
+            # Fetch certificate definitions to potentially fix "Unknown" issuers
+            cert_type_ids_for_read = [c.certificate_type_id for c in version.certificates if c.certificate_type_id]
+            cert_definitions_for_read = {}
+            if cert_type_ids_for_read:
+                cert_defs_read = self.session.exec(
+                    select(CertificateDefinition)
+                    .where(CertificateDefinition.id.in_(cert_type_ids_for_read))
+                ).all()
+                cert_definitions_for_read = {cd.id: cd.issuer_authority for cd in cert_defs_read if cd.issuer_authority and cd.issuer_authority.strip()}
+
             draft_data = TechnicalDataUpdate(
                 manufacturing_country=version.manufacturing_country,
                 total_carbon_footprint=version.total_carbon_footprint,
@@ -314,14 +326,18 @@ class ProductContributionService:
 
                 certificates=[
                     CertificateInput(
-                        id=str(c.id),  # Return ID of the link, not the artifact
+                        # Return ID of the link, not the artifact
+                        id=str(c.id),
                         lineage_id=c.lineage_id,
                         certificate_type_id=c.certificate_type_id,
                         source_artifact_id=c.source_artifact_id,
                         name=c.snapshot_name,
-                        issuer=c.snapshot_issuer,  # Include for display, but not accepted as input
+                        # If issuer is "Unknown" or missing, try to re-fetch from certificate definition
+                        issuer=cert_definitions_for_read.get(c.certificate_type_id) if (c.snapshot_issuer == "Unknown" or not c.snapshot_issuer) and c.certificate_type_id in cert_definitions_for_read else c.snapshot_issuer,
                         expiry_date=c.valid_until,
-                        file_url=c.file_url
+                        file_url=c.file_url,
+                        file_name=c.file_name,  # Include filename so frontend can preserve it on updates
+                        file_size_bytes=c.file_size_bytes  # Include file size
                     ) for c in version.certificates
                 ]
             )
@@ -339,7 +355,8 @@ class ProductContributionService:
             updated_at=req.updated_at,
             product_name=product.name,
             sku=product.sku,
-            product_description=product.description,  # Product description for supplier to review
+            # Product description for supplier to review
+            product_description=product.description,
             product_images=images,
             version_name=version.version_name,
             current_draft=draft_data,
@@ -393,9 +410,9 @@ class ProductContributionService:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Cannot decline request. Current status is '{req.status.value}'. "
-                           f"Suppliers can only decline requests that are not yet submitted or completed."
+                    f"Suppliers can only decline requests that are not yet submitted or completed."
                 )
-            
+
             req.status = RequestStatus.DECLINED
             version.status = ProductVersionStatus.REJECTED
 
@@ -477,7 +494,7 @@ class ProductContributionService:
                 status_code=409,  # Conflict
                 detail=f"Cannot edit data: The technical version is locked ({version.status.value}). Supplier cannot modify submitted or approved versions."
             )
-        
+
         # Additional check: Only DRAFT versions can be edited
         if version.status != ProductVersionStatus.DRAFT:
             raise HTTPException(
@@ -498,7 +515,8 @@ class ProductContributionService:
         # 2. Update Materials (Full Replace Strategy with Lineage Tracking)
         # Build map of existing lineage IDs for validation and preserve source_material_definition_id
         existing_material_lineages = {m.lineage_id for m in version.materials}
-        existing_material_definitions = {m.lineage_id: m.source_material_definition_id for m in version.materials}
+        existing_material_definitions = {
+            m.lineage_id: m.source_material_definition_id for m in version.materials}
 
         for m in list(version.materials):
             self.session.delete(m)
@@ -520,12 +538,14 @@ class ProductContributionService:
             source_def_id = m_in.source_material_definition_id
             if not source_def_id and m_in.lineage_id and m_in.lineage_id in existing_material_definitions:
                 # Fallback: preserve existing if frontend didn't provide one
-                source_def_id = existing_material_definitions.get(m_in.lineage_id)
+                source_def_id = existing_material_definitions.get(
+                    m_in.lineage_id)
 
             self.session.add(ProductVersionMaterial(
                 version_id=version.id,
                 lineage_id=final_lineage_id,
-                source_material_definition_id=source_def_id,  # Use from frontend or preserve existing
+                # Use from frontend or preserve existing
+                source_material_definition_id=source_def_id,
                 material_name=m_in.name,
                 percentage=m_in.percentage,
                 origin_country=m_in.origin_country,
@@ -563,20 +583,38 @@ class ProductContributionService:
         # Map uploaded files by their internal ID from the frontend (temp_file_id)
         file_map = {f.filename: f for f in files}
 
-        # Build map of existing lineage IDs for validation and preserve existing issuer info and source_artifact_id
+        # Build map of existing lineage IDs for validation and preserve existing issuer info, source_artifact_id, file_name, file_type, and file_size
         existing_cert_lineages = {c.lineage_id for c in version.certificates}
-        existing_cert_issuers = {c.lineage_id: c.snapshot_issuer for c in version.certificates}
-        existing_cert_artifacts = {c.lineage_id: c.source_artifact_id for c in version.certificates}
+        existing_cert_issuers = {
+            c.lineage_id: c.snapshot_issuer for c in version.certificates}
+        existing_cert_artifacts = {
+            c.lineage_id: c.source_artifact_id for c in version.certificates}
+        existing_cert_file_names = {
+            c.lineage_id: c.file_name for c in version.certificates}
+        existing_cert_file_types = {
+            c.lineage_id: c.file_type for c in version.certificates}
+        existing_cert_file_sizes = {
+            c.lineage_id: c.file_size_bytes for c in version.certificates}
 
         # Fetch all certificate definitions to get issuer_authority as fallback
-        cert_type_ids = list({cert_input.certificate_type_id for cert_input in data.certificates})
+        cert_type_ids = list(
+            {cert_input.certificate_type_id for cert_input in data.certificates})
         cert_definitions = {}
         if cert_type_ids:
             cert_defs = self.session.exec(
                 select(CertificateDefinition)
                 .where(CertificateDefinition.id.in_(cert_type_ids))
             ).all()
-            cert_definitions = {cd.id: cd.issuer_authority for cd in cert_defs}
+            cert_definitions = {cd.id: cd.issuer_authority for cd in cert_defs if cd.issuer_authority}
+            
+            # Log warning if any certificate definitions are missing or have empty issuer_authority
+            found_ids = {cd.id for cd in cert_defs}
+            missing_ids = set(cert_type_ids) - found_ids
+            if missing_ids:
+                logger.warning(f"Certificate definitions not found for IDs: {missing_ids}")
+            empty_issuer_ids = {cd.id for cd in cert_defs if not cd.issuer_authority}
+            if empty_issuer_ids:
+                logger.warning(f"Certificate definitions with empty issuer_authority: {empty_issuer_ids}")
 
         # Clear existing certificate links
         # (We recreate them to ensure the list matches the frontend state exactly)
@@ -585,6 +623,23 @@ class ProductContributionService:
         version.certificates = []
 
         for cert_input in data.certificates:
+            # Validate certificate definition exists and has issuer_authority
+            if cert_input.certificate_type_id not in cert_definitions:
+                # Try to fetch it individually to get better error message
+                cert_def = self.session.get(CertificateDefinition, cert_input.certificate_type_id)
+                if not cert_def:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Certificate definition with ID {cert_input.certificate_type_id} not found. Please ensure the certificate type exists."
+                    )
+                if not cert_def.issuer_authority or not cert_def.issuer_authority.strip():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Certificate definition '{cert_def.name}' (ID: {cert_input.certificate_type_id}) has no issuer_authority set. Please update the certificate definition."
+                    )
+                # Add it to the map for use below
+                cert_definitions[cert_input.certificate_type_id] = cert_def.issuer_authority
+            
             # Handle lineage_id
             if cert_input.lineage_id:
                 if cert_input.lineage_id not in existing_cert_lineages:
@@ -599,10 +654,26 @@ class ProductContributionService:
             final_file_url = cert_input.file_url
             artifact_id = None
             detected_content_type = "application/octet-stream"
+            final_file_name = None  # Will be set in either CASE A or CASE B
+            final_file_size_bytes = None  # Will be set in either CASE A or CASE B
 
             # CASE A: NEW FILE UPLOAD
             if cert_input.temp_file_id and cert_input.temp_file_id in file_map:
                 uploaded_file = file_map[cert_input.temp_file_id]
+
+                print("The uploaded file details: ",
+                      uploaded_file.content_type, uploaded_file.filename)
+
+                # Validate file extension for certificates
+                from app.utils.file_storage import validate_certificate_file_extension
+                validate_certificate_file_extension(uploaded_file.filename or "")
+
+                # Capture file size before saving
+                # Read the file content to get size (we need to do this before saving)
+                uploaded_file.file.seek(0, 2)  # Seek to end
+                file_size = uploaded_file.file.tell()
+                uploaded_file.file.seek(0)  # Reset to beginning for saving
+                final_file_size_bytes = file_size
 
                 # Detect MIME
                 if uploaded_file.content_type:
@@ -612,8 +683,8 @@ class ProductContributionService:
                     if mime:
                         detected_content_type = mime
 
-                # Save to S3/Local
-                saved_url = save_upload_file(uploaded_file)
+                # Save to S3/Local (validate_extension=False since we already validated above)
+                saved_url = save_upload_file(uploaded_file, validate_extension=False)
 
                 # Register in Supplier's Vault (SupplierArtifact)
                 artifact = SupplierArtifact(
@@ -628,6 +699,8 @@ class ProductContributionService:
 
                 final_file_url = saved_url
                 artifact_id = artifact.id  # Use new artifact for new upload
+                # Use the original filename with extension for file_name
+                final_file_name = uploaded_file.filename
 
             # CASE B: EXISTING FILE (NO NEW UPLOAD)
             elif final_file_url:
@@ -636,37 +709,62 @@ class ProductContributionService:
                 if not artifact_id and cert_input.lineage_id and cert_input.lineage_id in existing_cert_artifacts:
                     # Fallback: preserve existing artifact/file link if frontend didn't provide one
                     artifact_id = existing_cert_artifacts[cert_input.lineage_id]
+
+                # Preserve existing file_name and file_type if updating an existing certificate
+                # Frontend can optionally provide file_name to update it, otherwise preserve existing
+                if cert_input.lineage_id and cert_input.lineage_id in existing_cert_file_names:
+                    # Preserve existing file_name (with extension) unless frontend explicitly provides a new one
+                    final_file_name = cert_input.file_name if cert_input.file_name else existing_cert_file_names[cert_input.lineage_id]
+                    # Preserve existing file_type unless we can detect a better one
+                    if cert_input.lineage_id in existing_cert_file_types:
+                        detected_content_type = existing_cert_file_types[cert_input.lineage_id]
+                else:
+                    # New certificate from library - use file_name from frontend or extract from URL
+                    final_file_name = cert_input.file_name or final_file_url.split("/")[-1]
                 
-                # Guess Type for Snapshot
-                mime, _ = mimetypes.guess_type(final_file_url)
-                if mime:
-                    detected_content_type = mime
+                # Guess Type for Snapshot (only if we don't have existing file_type)
+                if not (cert_input.lineage_id and cert_input.lineage_id in existing_cert_file_types):
+                    mime, _ = mimetypes.guess_type(final_file_url)
+                    if mime:
+                        detected_content_type = mime
 
             # Create Link (Snapshot)
             if final_file_url:
+                # Ensure file_name is set (fallback to extracting from URL if not set)
+                if final_file_name is None:
+                    final_file_name = cert_input.file_name or final_file_url.split("/")[-1]
+
                 # Determine issuer - ALWAYS from certificate definition, never from frontend input
                 # Fallback priority:
-                # 1. Existing issuer if editing existing certificate (preserve what was there)
-                # 2. Certificate definition's issuer_authority (automatic from certificate type)
+                # 1. Certificate definition's issuer_authority (automatic from certificate type) - PREFERRED
+                # 2. Existing issuer if editing existing certificate (preserve what was there, unless it's "Unknown")
                 # 3. "Unknown" as last resort
                 # NOTE: cert_input.issuer is IGNORED - issuer is always fetched from certificate definition
-                
+
                 final_issuer = None
-                
-                # If editing existing certificate, preserve existing issuer
-                if cert_input.lineage_id and cert_input.lineage_id in existing_cert_issuers:
+
+                # FIRST: Try to fetch from certificate definition (this is the source of truth)
+                if cert_input.certificate_type_id in cert_definitions:
+                    issuer_from_def = cert_definitions[cert_input.certificate_type_id]
+                    if issuer_from_def and issuer_from_def.strip():  # Ensure it's not empty
+                        final_issuer = issuer_from_def
+                    else:
+                        logger.warning(f"Certificate definition {cert_input.certificate_type_id} has empty issuer_authority")
+                else:
+                    logger.warning(f"Certificate definition {cert_input.certificate_type_id} not found in lookup")
+
+                # SECOND: If not found in definition, preserve existing issuer (unless it's "Unknown")
+                # This handles cases where definition might have been deleted, but we want to preserve valid issuers
+                if not final_issuer and cert_input.lineage_id and cert_input.lineage_id in existing_cert_issuers:
                     existing_issuer = existing_cert_issuers[cert_input.lineage_id]
-                    # Use existing issuer (preserve what was there)
-                    final_issuer = existing_issuer
-                
-                # If still no issuer, fetch from certificate definition's issuer_authority
-                if not final_issuer and cert_input.certificate_type_id in cert_definitions:
-                    final_issuer = cert_definitions[cert_input.certificate_type_id]
-                
+                    # Only use existing issuer if it's not "Unknown" (Unknown means lookup failed before)
+                    if existing_issuer and existing_issuer != "Unknown":
+                        final_issuer = existing_issuer
+
                 # Default to "Unknown" only if no issuer found anywhere
                 if not final_issuer:
                     final_issuer = "Unknown"
-                
+
                 new_link = ProductVersionCertificate(
                     version_id=version.id,
                     lineage_id=final_lineage_id,
@@ -677,8 +775,9 @@ class ProductContributionService:
                     snapshot_issuer=final_issuer,
                     valid_until=cert_input.expiry_date,
                     file_url=final_file_url,
-                    file_name=cert_input.name,
-                    file_type=detected_content_type
+                    file_name=final_file_name,  # Preserve original filename with extension
+                    file_type=detected_content_type,
+                    file_size_bytes=final_file_size_bytes  # File size in bytes
                 )
                 self.session.add(new_link)
 
@@ -936,7 +1035,8 @@ class ProductContributionService:
                 snapshot_issuer=c.snapshot_issuer,
                 valid_until=c.valid_until,
                 file_url=c.file_url,
-                file_type=c.file_type
+                file_type=c.file_type,
+                file_size_bytes=c.file_size_bytes
             ) for c in version.certificates]
         )
 
@@ -1013,16 +1113,18 @@ class ProductContributionService:
                 if supplier:
                     supplier_name = supplier.name
                     supplier_country = supplier.location_country
-            
+
             # Fetch decline reason if request is declined
             if req_status == RequestStatus.DECLINED and request.comments:
                 # Find the decline reason comment from supplier (most recent one)
                 supplier_tenant_id = request.supplier_tenant_id
                 # Sort comments by date descending to get most recent first
-                sorted_comments = sorted(request.comments, key=lambda c: c.created_at, reverse=True)
+                sorted_comments = sorted(
+                    request.comments, key=lambda c: c.created_at, reverse=True)
                 for comment in sorted_comments:
                     # Check if comment author belongs to supplier tenant
-                    comment_author = self.session.get(User, comment.author_user_id)
+                    comment_author = self.session.get(
+                        User, comment.author_user_id)
                     if comment_author:
                         author_membership = self.session.exec(
                             select(TenantMember)
@@ -1223,7 +1325,8 @@ class ProductContributionService:
                     snapshot_issuer=c.snapshot_issuer,
                     valid_until=c.valid_until,
                     file_url=c.file_url,
-                    file_type=c.file_type
+                    file_type=c.file_type,
+                    file_size_bytes=c.file_size_bytes
                 ) for c in version.certificates
             ]
         )

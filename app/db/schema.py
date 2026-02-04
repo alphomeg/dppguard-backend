@@ -1221,6 +1221,11 @@ class ProductVersionCertificate(TimestampMixin, SQLModel, table=True):
         description="The MIME type or extension of the file. Example: 'application/pdf'."
     )
 
+    file_size_bytes: Optional[int] = Field(
+        default=None,
+        description="The size of the file in bytes. Example: 1048576 (1 MB)."
+    )
+
     file_display_name: Optional[str] = Field(default=None)
 
     # =========================================================

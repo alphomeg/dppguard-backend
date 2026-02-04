@@ -114,9 +114,17 @@ class CertificateInput(SQLModel):
         default=None,
         description="URL if the file is already uploaded."
     )
+    file_name: Optional[str] = Field(
+        default=None,
+        description="The original filename with extension (e.g., 'certificate.pdf'). When updating an existing certificate, include this to preserve the file extension. If omitted, the backend will preserve the existing filename."
+    )
+    file_size_bytes: Optional[int] = Field(
+        default=None,
+        description="READ-ONLY: The file size in bytes. Returned by the backend but not accepted as input."
+    )
     temp_file_id: Optional[str] = Field(
         default=None,
-        description="The ID returned by the upload endpoint if this is a new file being attached."
+        description="The ID returned by the upload endpoint if this is a new file being attached. This should match the filename of one of the files in the multipart/form-data upload."
     )
 
 
@@ -332,6 +340,7 @@ class ProductCertificateRead(SQLModel):
     valid_until: Optional[date]
     file_url: str
     file_type: str
+    file_size_bytes: Optional[int] = None
 
 
 class ProductVersionDetailRead(SQLModel):
